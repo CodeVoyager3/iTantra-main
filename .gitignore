@@ -1,0 +1,90 @@
+﻿# =============================
+# Android / Gradle Build Output
+# =============================
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+/build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ==============================
+# Kotlin / Java Compiled Classes
+# ==============================
+*.class
+*.jar
+out/
+
+# =============================
+# Large Model Binary Assets
+# =============================
+app/src/main/assets/models/
+*.onnx
+*.bin
+*.pt
+*.tflite
+*.ort
+*.so.bak
+
+# =============================
+# IDE & Editor Configs
+# =============================
+*.swp
+*.swo
+*~
+.vscode/
+*.sublime-project
+*.sublime-workspace
+nbproject/
+.nbattrs
+
+# =============================
+# NDK / CMake
+# =============================
+.externalNativeBuild/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# =============================
+# Signing Keystore (NEVER commit)
+# =============================
+*.jks
+*.keystore
+keystore.properties
+release.properties
+
+# =============================
+# Environment / Secrets
+# =============================
+.env
+.env.*
+secrets.properties
+google-services.json
+GoogleService-Info.plist
+
+# =============================
+# Test Reports & Coverage
+# =============================
+test-results/
+test-output/
+jacoco/
+*.exec
+
+# =============================
+# Profiling / Lint / Misc
+# =============================
+*.hprof
+lint-results*.xml
+*.log
+tmp/
+temp/
