@@ -7,12 +7,14 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.MacAddress
+import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.WifiP2pManager.ActionListener
 import android.os.Build
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.itantra.app.model.PeerDevice
 import com.itantra.app.model.TransportProtocol
@@ -51,12 +53,16 @@ class WifiDirectMeshManager(context: Context) {
     }
 
     private val appContext = context.applicationContext
+    private val wifiManager: WifiManager? =
+        appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     private val manager: WifiP2pManager? =
-        appContext.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
+        appContext.getSystemService(Context.WIFI_SERVICE) as? WifiP2pManager
+        ?: appContext.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
 
     private var channel: WifiP2pManager.Channel? = try {
-        manager?.initialize(appContext, appContext.mainLooper, null)
+        (appContext.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager)?.initialize(appContext, appContext.mainLooper, null)
     } catch (_: Exception) {
         null
     }
@@ -271,6 +277,31 @@ class WifiDirectMeshManager(context: Context) {
     // UDP mesh (broadcast + receive)
     // =========================================================================
 
+    private fun acquireMulticastLock() {
+        try {
+            if (multicastLock == null) {
+                multicastLock = wifiManager?.createMulticastLock("iTantraMeshLock")?.apply {
+                    setReferenceCounted(true)
+                }
+            }
+            if (multicastLock?.isHeld != true) {
+                multicastLock?.acquire()
+                Log.i("WifiDirectMeshManager", "Acquired WifiManager.MulticastLock")
+            }
+        } catch (e: Exception) {
+            Log.w("WifiDirectMeshManager", "Could not acquire MulticastLock", e)
+        }
+    }
+
+    private fun releaseMulticastLock() {
+        try {
+            if (multicastLock?.isHeld == true) {
+                multicastLock?.release()
+                Log.i("WifiDirectMeshManager", "Released WifiManager.MulticastLock")
+            }
+        } catch (_: Exception) {}
+    }
+
     /**
      * Opens the shared UDP broadcast socket on port 8889.
      *
@@ -279,6 +310,7 @@ class WifiDirectMeshManager(context: Context) {
     @Synchronized
     fun startUdpBroadcast(): Boolean {
         if (socket != null) return true
+        acquireMulticastLock()
         return try {
             val s = DatagramSocket(null)
             s.reuseAddress = true
@@ -286,9 +318,10 @@ class WifiDirectMeshManager(context: Context) {
             s.bind(InetSocketAddress(UDP_PORT))
             socket = s
             udpThread = thread(name = "itantra-udp-rx", isDaemon = true) { udpReceiveLoop(s) }
+            Log.i("WifiDirectMeshManager", "UDP broadcast socket bound on port $UDP_PORT")
             true
-        } catch (_: Exception) {
-            // Port busy / no network — the mesh just stays silent.
+        } catch (e: Exception) {
+            Log.e("WifiDirectMeshManager", "Port busy or failed to bind UDP socket", e)
             false
         }
     }
@@ -304,21 +337,44 @@ class WifiDirectMeshManager(context: Context) {
                 }
             } catch (_: SocketException) {
                 break // socket closed — exit the loop
-            } catch (_: Exception) {
-                // Keep listening; a single malformed packet must not kill the loop.
+            } catch (e: Exception) {
+                Log.w("WifiDirectMeshManager", "Error receiving UDP packet", e)
             }
         }
     }
 
-    /** Broadcasts [bytes] to the whole ad-hoc LAN (255.255.255.255:8889). */
+    private fun getBroadcastAddresses(): List<InetAddress> {
+        val list = mutableListOf<InetAddress>()
+        try {
+            list.add(InetAddress.getByName(UDP_BROADCAST_HOST))
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return list
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (iface.isLoopback || !iface.isUp) continue
+                for (interfaceAddress in iface.interfaceAddresses) {
+                    val broadcast = interfaceAddress.broadcast
+                    if (broadcast != null) {
+                        list.add(broadcast)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return list.distinct()
+    }
+
+    /** Broadcasts [bytes] to the ad-hoc LAN / Wi-Fi network. */
     fun broadcastDatagram(bytes: ByteArray): Boolean {
         val s = socket ?: return false
-        return try {
-            s.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(UDP_BROADCAST_HOST), UDP_PORT))
-            true
-        } catch (_: Exception) {
-            false
+        val addresses = getBroadcastAddresses()
+        var sent = false
+        for (addr in addresses) {
+            try {
+                s.send(DatagramPacket(bytes, bytes.size, addr, UDP_PORT))
+                sent = true
+            } catch (_: Exception) {
+            }
         }
+        return sent
     }
 
     /** Sends [bytes] to a single host:port (direct-IP links). */
@@ -339,6 +395,7 @@ class WifiDirectMeshManager(context: Context) {
         runCatching { s?.close() }
         udpThread?.interrupt()
         udpThread = null
+        releaseMulticastLock()
     }
 
     /** Stops everything: UDP, discovery, and the P2P broadcast receiver. */

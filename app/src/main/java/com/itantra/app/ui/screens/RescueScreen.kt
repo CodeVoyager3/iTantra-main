@@ -57,9 +57,21 @@ import androidx.compose.material.icons.filled.PhoneDisabled
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.heightIn
+import com.itantra.app.model.SupportedLanguage
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -102,6 +114,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.itantra.app.model.DistressVictim
 import com.itantra.app.model.RescueConnectionMode
 import com.itantra.app.ui.components.BatteryIndicator
+import com.itantra.app.ui.components.DigitalAudioVisualizer
 import com.itantra.app.ui.theme.AccentBlue
 import com.itantra.app.ui.theme.AccentBlueContainer
 import com.itantra.app.ui.theme.BadgeMintContainer
@@ -142,6 +155,7 @@ import kotlin.math.sin
  *    - Rich victim cards with relative distances, friendly signal indicators, hazard tags,
  *      quoted distress messages in native language, and direct 1-to-1 connect buttons.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun RescueScreen(
     viewModel: MissionControlViewModel,
@@ -158,6 +172,14 @@ fun RescueScreen(
     val isMapExpanded by viewModel.isMapExpanded.collectAsState()
     val isMicMuted by viewModel.isMicMuted.collectAsState()
     val isSpeakerphoneOn by viewModel.isSpeakerphoneOn.collectAsState()
+    val audioLevel by viewModel.audioLevel.collectAsState()
+    val modelWarning by viewModel.modelWarningMessage.collectAsState()
+    val uiState by viewModel.uiState.collectAsState()
+    val selectedLanguage = uiState.selectedLanguage
+    val modelPacks by viewModel.modelPacks.collectAsState()
+
+    var showLanguageSheet by remember { mutableStateOf(false) }
+    var languageSearchQuery by remember { mutableStateOf("") }
 
     val scrollState = rememberScrollState()
 
@@ -262,6 +284,171 @@ fun RescueScreen(
                             else -> BadgeMintText
                         }
                     )
+                }
+            }
+        }
+
+        // =========================================================================
+        // RESCUE OPERATING LANGUAGE SELECTOR & 1-TAP DIALECT BAR
+        // =========================================================================
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
+                .padding(14.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // Top Row: Selected Language summary & Switch trigger
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { showLanguageSheet = true },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(colors.accent.copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = selectedLanguage.nativeInitial,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.accent
+                            )
+                        }
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "RESCUE DIALECT: ",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.6.sp,
+                                    color = colors.textSecondary
+                                )
+                                Text(
+                                    text = "${selectedLanguage.englishName} (${selectedLanguage.code.uppercase()})",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                            }
+                            val isInstalled = modelPacks.firstOrNull { it.iso == selectedLanguage.code || it.languageTag.startsWith(selectedLanguage.code) }?.isInstalled == true
+                            Text(
+                                text = if (isInstalled) "✓ Neural Pack Ready" else "⚠ Pack Not Installed (${selectedLanguage.downloadSizeMb} MB)",
+                                fontSize = 11.sp,
+                                fontWeight = if (isInstalled) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isInstalled) Color(0xFF059669) else RescueAmberText
+                            )
+                        }
+                    }
+
+                    Surface(
+                        onClick = { showLanguageSheet = true },
+                        shape = RoundedCornerShape(8.dp),
+                        color = colors.cardSecondaryBg,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, colors.outline)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "SWITCH",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.accent
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Icon(
+                                imageVector = Icons.Default.ExpandMore,
+                                contentDescription = "Switch Language",
+                                tint = colors.accent,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = colors.outline.copy(alpha = 0.5f), thickness = 1.dp)
+
+                // 1-Tap Dialect Chips: Hindi, English, Bengali, Marathi, etc.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val quickLangs = listOf(
+                        SupportedLanguage.HINDI,
+                        SupportedLanguage.ENGLISH,
+                        SupportedLanguage.BENGALI,
+                        SupportedLanguage.MARATHI
+                    )
+
+                    quickLangs.forEach { lang ->
+                        val isLangActive = selectedLanguage == lang
+                        val isInstalled = modelPacks.firstOrNull { it.iso == lang.code || it.languageTag.startsWith(lang.code) }?.isInstalled == true
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isLangActive) colors.accent else colors.cardSecondaryBg)
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isLangActive) colors.accent else colors.outline,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .clickable { viewModel.setSelectedLanguage(lang) }
+                                .padding(vertical = 7.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = lang.englishName,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isLangActive) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isLangActive) Color.White else colors.textPrimary
+                                )
+                                if (isInstalled) {
+                                    Text(
+                                        text = "READY",
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isLangActive) Color(0xFFD1FAE5) else Color(0xFF059669)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // "+More" Pill
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(colors.cardSecondaryBg)
+                            .border(1.dp, colors.outline, RoundedCornerShape(8.dp))
+                            .clickable { showLanguageSheet = true }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "+6",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.textSecondary
+                        )
+                    }
                 }
             }
         }
@@ -756,6 +943,66 @@ fun RescueScreen(
                                         else if (isBroadcastingToAll) (if (colors.isDark) Color(0xFF78350F) else Color(0xFFFDE68A))
                                         else colors.outline
                                     )
+                            )
+
+                            // Model Download Warning Banner (if model pack is missing)
+                            if (modelWarning != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (colors.isDark) Color(0xFF451A03) else Color(0xFFFEF3C7))
+                                        .border(1.dp, RescueAmber.copy(alpha = 0.8f), RoundedCornerShape(10.dp))
+                                        .padding(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.weight(1f),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.WarningAmber,
+                                                contentDescription = null,
+                                                tint = RescueAmber,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = modelWarning ?: "",
+                                                fontSize = 11.sp,
+                                                color = if (colors.isDark) Color(0xFFFDE68A) else Color(0xFF92400E),
+                                                lineHeight = 15.sp
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { viewModel.dismissModelWarning() },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "Dismiss",
+                                                tint = RescueAmber,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Digital Gray-Line Audio Visualizer
+                            DigitalAudioVisualizer(
+                                audioLevel = audioLevel,
+                                isActive = connectedVictim != null || isBroadcastingToAll,
+                                label = when {
+                                    connectedVictim != null -> "RESCUER 2-WAY INTERCOM"
+                                    isBroadcastingToAll -> "RESCUE BROADCAST ON AIR"
+                                    else -> "AUDIO STANDBY"
+                                },
+                                modifier = Modifier.fillMaxWidth()
                             )
 
                             // Big Hands-Free Audio Controls Row (Big Mic, Big Speaker, Big Disconnect)
@@ -1495,6 +1742,107 @@ fun RescueScreen(
             }
         }
     }
+
+    // Modal Bottom Sheet for All 10 Supported Indian Dialects
+    if (showLanguageSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showLanguageSheet = false },
+            containerColor = colors.surface,
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Select Rescuer Language",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary
+                    )
+                    IconButton(onClick = { showLanguageSheet = false }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textSecondary)
+                    }
+                }
+
+                OutlinedTextField(
+                    value = languageSearchQuery,
+                    onValueChange = { languageSearchQuery = it },
+                    placeholder = { Text("Search language or dialect...", fontSize = 13.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                val filtered = remember(languageSearchQuery) {
+                    if (languageSearchQuery.isBlank()) SupportedLanguage.entries
+                    else {
+                        val q = languageSearchQuery.trim().lowercase()
+                        SupportedLanguage.entries.filter {
+                            it.englishName.lowercase().contains(q) ||
+                            it.nativeName.lowercase().contains(q) ||
+                            it.code.lowercase().contains(q)
+                        }
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 380.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filtered) { lang ->
+                        val isSelected = selectedLanguage == lang
+                        val isInstalled = modelPacks.firstOrNull { it.iso == lang.code || it.languageTag.startsWith(lang.code) }?.isInstalled == true
+                        Surface(
+                            onClick = {
+                                viewModel.setSelectedLanguage(lang)
+                                showLanguageSheet = false
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSelected) colors.accent.copy(alpha = 0.12f) else colors.cardSecondaryBg,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (isSelected) colors.accent else colors.outline
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(14.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        text = "${lang.englishName} (${lang.nativeName})",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = if (isSelected) colors.accent else colors.textPrimary
+                                    )
+                                    Text(
+                                        text = if (isInstalled) "✓ Installed & Ready" else "Neural Pack: ${lang.downloadSizeMb} MB",
+                                        fontSize = 11.sp,
+                                        color = if (isInstalled) Color(0xFF059669) else colors.textSecondary
+                                    )
+                                }
+                                if (isSelected) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = colors.accent)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -1566,9 +1914,8 @@ fun MinimalBrightMapCanvas(
                 val badgePadPx = with(density) { 16.dp.toPx() }
 
                 currentVictims.forEach { victim ->
-                    val relBearing = victim.relativeBearingDegrees - currentCompassHeading
-                    val angleRad = Math.toRadians(relBearing - 90.0)
-                    val normDist = (victim.distanceMeters / 90f).coerceIn(0.2f, 0.92f)
+                    val angleRad = Math.toRadians(victim.relativeBearingDegrees.toDouble() - 90.0)
+                    val normDist = (victim.distanceMeters / 90f).coerceIn(0.15f, 0.92f)
                     val r = normDist * maxRadius
                     val vx = cx + (r * cos(angleRad)).toFloat()
                     val vy = cy + (r * sin(angleRad)).toFloat()
@@ -1685,8 +2032,7 @@ fun MinimalBrightMapCanvas(
 
         val cardinalDirections = listOf("N" to 0f, "E" to 90f, "S" to 180f, "W" to 270f)
         cardinalDirections.forEach { (label, bearing) ->
-            val relDeg = bearing - compassHeading
-            val angleRad = Math.toRadians(relDeg - 90.0)
+            val angleRad = Math.toRadians(bearing.toDouble() - 90.0)
             val labelR = maxRadius * 1.06f
             val lx = cx + (labelR * cos(angleRad)).toFloat()
             val ly = cy + (labelR * sin(angleRad)).toFloat() + 3.dp.toPx()
@@ -1698,7 +2044,7 @@ fun MinimalBrightMapCanvas(
             )
         }
 
-        // 5. Victim Map Pins & Small Floating Cards
+        // 5. Victim Map Pins & Small Floating Cards (True relative coordinates)
         val cardTextPaint = Paint().apply {
             color = if (isDark) android.graphics.Color.parseColor("#F8FAFC") else android.graphics.Color.parseColor("#0F172A")
             textSize = 10.sp.toPx()
@@ -1713,9 +2059,8 @@ fun MinimalBrightMapCanvas(
         }
 
         victims.forEach { victim ->
-            val relBearing = victim.relativeBearingDegrees - compassHeading
-            val angleRad = Math.toRadians(relBearing - 90.0)
-            val normDist = (victim.distanceMeters / 90f).coerceIn(0.2f, 0.92f)
+            val angleRad = Math.toRadians(victim.relativeBearingDegrees.toDouble() - 90.0)
+            val normDist = (victim.distanceMeters / 90f).coerceIn(0.15f, 0.92f)
             val r = normDist * maxRadius
             val vx = cx + (r * cos(angleRad)).toFloat()
             val vy = cy + (r * sin(angleRad)).toFloat()
@@ -1777,21 +2122,39 @@ fun MinimalBrightMapCanvas(
             }
         }
 
-        // 6. Rescuer GPS Location Puck at Center
-        val conePath = Path().apply {
-            moveTo(cx, cy)
-            lineTo(cx - 24.dp.toPx(), cy - 55.dp.toPx())
-            lineTo(cx + 24.dp.toPx(), cy - 55.dp.toPx())
-            close()
-        }
-        drawPath(
-            path = conePath,
-            brush = Brush.verticalGradient(
-                colors = listOf(Color(0x3338BDF8), Color(0x0038BDF8)),
-                startY = cy - 50.dp.toPx(),
-                endY = cy
+        // 6. Rescuer GPS Location Puck at Center with rotating vision cone & chevron
+        withTransform({
+            rotate(compassHeading, pivot = Offset(cx, cy))
+        }) {
+            val conePath = Path().apply {
+                moveTo(cx, cy)
+                lineTo(cx - 24.dp.toPx(), cy - 55.dp.toPx())
+                lineTo(cx + 24.dp.toPx(), cy - 55.dp.toPx())
+                close()
+            }
+            drawPath(
+                path = conePath,
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color(0x3338BDF8), Color(0x0038BDF8)),
+                    startY = cy - 50.dp.toPx(),
+                    endY = cy
+                )
             )
-        )
+            // Forward Chevron Arrow
+            drawLine(
+                color = Color.White,
+                start = Offset(cx, cy - 10.dp.toPx()),
+                end = Offset(cx - 4.dp.toPx(), cy - 4.dp.toPx()),
+                strokeWidth = 2.dp.toPx()
+            )
+            drawLine(
+                color = Color.White,
+                start = Offset(cx, cy - 10.dp.toPx()),
+                end = Offset(cx + 4.dp.toPx(), cy - 4.dp.toPx()),
+                strokeWidth = 2.dp.toPx()
+            )
+        }
+
         // Center Rescuer Marker
         drawCircle(
             color = Color(0xFF38BDF8).copy(alpha = 0.3f),
@@ -1802,19 +2165,6 @@ fun MinimalBrightMapCanvas(
             color = Color(0xFF0284C7),
             radius = 6.dp.toPx(),
             center = Offset(cx, cy)
-        )
-        // Forward Chevron Arrow
-        drawLine(
-            color = Color.White,
-            start = Offset(cx, cy - 10.dp.toPx()),
-            end = Offset(cx - 4.dp.toPx(), cy - 4.dp.toPx()),
-            strokeWidth = 2.dp.toPx()
-        )
-        drawLine(
-            color = Color.White,
-            start = Offset(cx, cy - 10.dp.toPx()),
-            end = Offset(cx + 4.dp.toPx(), cy - 4.dp.toPx()),
-            strokeWidth = 2.dp.toPx()
         )
         }
     }

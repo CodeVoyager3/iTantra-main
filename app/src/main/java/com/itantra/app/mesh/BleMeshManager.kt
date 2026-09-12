@@ -150,6 +150,7 @@ data class DiscoveredBeacon(
     val batteryPercent: Int,
     val latitudeDeg: Double,
     val longitudeDeg: Double,
+    val altitudeMeters: Int = 0,
     val languageIso: String,
     val isDistress: Boolean,
     val lastSeenEpochMs: Long
@@ -188,8 +189,8 @@ class BleMeshManager(context: Context) {
         /** The actual UUID advertised/scanned, derived from the spec string. */
         val SERVICE_UUID: UUID = UUID.fromString("00004954-414e-1000-8000-00805f9b34fb")
 
-        private const val BEACON_STALE_MS = 10_000L
-        private const val PRUNE_PERIOD_MS = 5_000L
+        private const val BEACON_STALE_MS = 3_000L
+        private const val PRUNE_PERIOD_MS = 1_000L
     }
 
     private val appContext = context.applicationContext
@@ -390,6 +391,7 @@ class BleMeshManager(context: Context) {
                 batteryPercent = payload.batteryPercent,
                 latitudeDeg = payload.latitudeDeg,
                 longitudeDeg = payload.longitudeDeg,
+                altitudeMeters = payload.altitudeMeters,
                 languageIso = payload.languageIso,
                 isDistress = payload.isDistress,
                 lastSeenEpochMs = System.currentTimeMillis()

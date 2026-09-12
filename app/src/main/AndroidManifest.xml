@@ -12,9 +12,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 
-    <!-- ── Wi-Fi Direct ── -->
+    <!-- ── Wi-Fi Direct & Mesh UDP Multicast ── -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- ── Location (required by OS for Wi-Fi Direct + BLE scan APIs) ── -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

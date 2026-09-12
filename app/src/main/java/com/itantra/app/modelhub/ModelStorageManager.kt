@@ -48,8 +48,12 @@ class ModelStorageManager(context: Context) {
 
     fun installedTags(): Set<String> = _installedPacks.value.keys
 
-    fun isInstalled(languageTag: String): Boolean =
-        _installedPacks.value.containsKey(languageTag)
+    fun isInstalled(languageTag: String): Boolean {
+        val keys = _installedPacks.value.keys
+        return keys.contains(languageTag) || keys.any {
+            it.startsWith("$languageTag-", ignoreCase = true) || it.equals(languageTag, ignoreCase = true)
+        }
+    }
 
     /**
      * Deletes the extracted pack directory for [languageTag].
@@ -57,9 +61,12 @@ class ModelStorageManager(context: Context) {
      * @return the number of bytes freed (0 if it was not installed).
      */
     suspend fun deleteModel(languageTag: String): Long = withContext(Dispatchers.IO) {
-        val dir = File(modelsDir, languageTag)
-        val freedBytes = dirSizeBytes(dir)
-        if (dir.exists()) dir.deleteRecursively()
+        val targetDir = File(modelsDir, languageTag).takeIf { it.exists() }
+            ?: modelsDir.listFiles()?.firstOrNull {
+                it.isDirectory && (it.name.startsWith("$languageTag-", ignoreCase = true) || it.name.equals(languageTag, ignoreCase = true))
+            }
+        val freedBytes = if (targetDir != null) dirSizeBytes(targetDir) else 0L
+        if (targetDir != null && targetDir.exists()) targetDir.deleteRecursively()
         _installedPacks.value = scanInstalled()
         freedBytes
     }

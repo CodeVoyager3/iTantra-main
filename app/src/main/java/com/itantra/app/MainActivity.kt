@@ -149,6 +149,7 @@ fun MainAppContent(viewModel: MissionControlViewModel) {
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         hasMicPermission = results[Manifest.permission.RECORD_AUDIO] ?: false
+        viewModel.onPermissionsGranted()
     }
 
     LaunchedEffect(Unit) {
@@ -191,6 +192,7 @@ fun MainAppContent(viewModel: MissionControlViewModel) {
                 if (btRestored) {
                     viewModel.onBluetoothStateRestored()
                 }
+                viewModel.onPermissionsGranted()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)

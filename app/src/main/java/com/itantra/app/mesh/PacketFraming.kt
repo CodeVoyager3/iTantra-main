@@ -62,6 +62,8 @@ object PacketFraming {
     const val MSG_TYPE_VOICE_FRAME = 0x02
     const val MSG_TYPE_TRANSLATED_TEXT = 0x03
     const val MSG_TYPE_VOICE_LINK_REQUEST = 0x04
+    const val MSG_TYPE_VOICE_LINK_ACK = 0x05
+    const val MSG_TYPE_VOICE_LINK_CLOSE = 0x06
 
     /**
      * Serializes [packet] into a single byte array, appending a CRC32

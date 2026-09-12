@@ -94,6 +94,18 @@ class OnnxInferenceManager(context: Context) {
         null
     }
 
+    private fun resolveModelSubdir(languageTag: String, subDirName: String): File? {
+        val direct = File(appContext.filesDir, "models/$languageTag/$subDirName")
+        if (direct.exists()) return direct
+        val baseDir = File(appContext.filesDir, "models")
+        if (!baseDir.exists()) return null
+        val matchingDir = baseDir.listFiles()?.firstOrNull {
+            it.isDirectory && (it.name.startsWith("$languageTag-", ignoreCase = true) || it.name.equals(languageTag, ignoreCase = true))
+        }
+        val candidate = if (matchingDir != null) File(matchingDir, subDirName) else null
+        return if (candidate?.exists() == true) candidate else direct
+    }
+
     /**
      * Loads the STT model + vocab for [languageTag].
      *
@@ -103,7 +115,7 @@ class OnnxInferenceManager(context: Context) {
     fun loadStt(languageTag: String): Boolean {
         closeSttLocked()
         val env = ensureEnvironment() ?: return false
-        val sttDir = File(appContext.filesDir, "models/$languageTag/stt")
+        val sttDir = resolveModelSubdir(languageTag, "stt") ?: return false
         val modelFile = resolveModelFile(sttDir, preferred = STT_MODEL_FILE) ?: return false
         return try {
             val session = env.createSession(modelFile.absolutePath, buildSessionOptions())
@@ -128,7 +140,7 @@ class OnnxInferenceManager(context: Context) {
     fun loadTts(languageTag: String): Boolean {
         closeTtsLocked()
         val env = ensureEnvironment() ?: return false
-        val ttsDir = File(appContext.filesDir, "models/$languageTag/tts")
+        val ttsDir = resolveModelSubdir(languageTag, "tts") ?: return false
         val fastPitchFile = resolveModelFile(ttsDir, preferred = FASTPITCH_FILE) ?: return false
         val hifiGanFile = resolveModelFile(ttsDir, preferred = HIFIGAN_FILE, exclude = fastPitchFile)
             ?: return false

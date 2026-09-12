@@ -87,6 +87,7 @@ import com.itantra.app.ui.theme.AccentBlue
 import com.itantra.app.ui.theme.AccentBlueContainer
 import com.itantra.app.ui.theme.BadgeIndigoContainer
 import com.itantra.app.ui.theme.BadgeIndigoText
+import com.itantra.app.ui.components.DigitalAudioVisualizer
 import com.itantra.app.ui.theme.BadgeMintContainer
 import com.itantra.app.ui.theme.BadgeMintText
 import com.itantra.app.ui.theme.MeshGreen
@@ -120,6 +121,7 @@ fun SosDistressScreen(
     val bluetoothEnabled by viewModel.bluetoothEnabled.collectAsState()
     val nearbyRescuers by viewModel.nearbyRescuers.collectAsState()
     val connectedRescuer by viewModel.connectedRescuer.collectAsState()
+    val audioLevel by viewModel.audioLevel.collectAsState()
     val selectedLanguage = uiState.selectedLanguage
 
     val scrollState = rememberScrollState()
@@ -704,6 +706,17 @@ fun SosDistressScreen(
                         )
                     }
                 }
+
+                // Digital Gray-Line Audio Visualizer (Live Microphone Activity)
+                if (isSosBroadcasting) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    DigitalAudioVisualizer(
+                        audioLevel = audioLevel,
+                        isActive = isSosBroadcasting,
+                        label = if (connectedRescuer != null) "LIVE 2-WAY INTERCOM" else "HANDS-FREE EMERGENCY MIC",
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
 
@@ -804,6 +817,15 @@ fun SosDistressScreen(
                                     )
                                 }
                             }
+
+                            // Digital Gray-Line Audio Visualizer for the Rescuer Intercom
+                            Spacer(modifier = Modifier.height(6.dp))
+                            DigitalAudioVisualizer(
+                                audioLevel = audioLevel,
+                                isActive = true,
+                                label = "RESCUER 2-WAY AUDIO LINK",
+                                modifier = Modifier.fillMaxWidth()
+                            )
                         }
                     }
                 }
