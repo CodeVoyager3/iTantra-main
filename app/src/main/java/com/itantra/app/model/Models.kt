@@ -13,7 +13,8 @@ enum class SupportedLanguage(
     val nativeInitial: String,
     val downloadSizeMb: Int,
     val locale: Locale,
-    val sampleAlertPhrase: String
+    val sampleAlertPhrase: String,
+    val languageTag: String = "${code}-IN"
 ) {
     HINDI(
         code = "hi",

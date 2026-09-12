@@ -27,12 +27,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Security
@@ -409,6 +412,9 @@ fun SettingsScreen(
                             pack = pack,
                             colors = colors,
                             onDownload = { viewModel.downloadModel(pack.languageTag) },
+                            onPauseDownload = { viewModel.pauseModelDownload(pack.languageTag) },
+                            onResumeDownload = { viewModel.downloadModel(pack.languageTag) },
+                            onCancelDownload = { viewModel.cancelModelDownload(pack.languageTag) },
                             onDeleteClick = { modelToDelete = pack }
                         )
                     }
@@ -1079,12 +1085,12 @@ private fun LanguagePackRow(
     pack: LanguageModelPack,
     colors: com.itantra.app.ui.theme.MinimalColors,
     onDownload: () -> Unit,
+    onPauseDownload: () -> Unit,
+    onResumeDownload: () -> Unit,
+    onCancelDownload: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
     val state = pack.downloadState
-    val busy = state is ModelDownloadState.Downloading ||
-        state is ModelDownloadState.Verifying ||
-        state is ModelDownloadState.Extracting
 
     Box(
         modifier = Modifier
@@ -1166,16 +1172,89 @@ private fun LanguagePackRow(
                         }
                     }
 
-                    busy -> Text(
-                        text = when (state) {
-                            is ModelDownloadState.Downloading -> "${(state.progress * 100).toInt()}%"
-                            is ModelDownloadState.Verifying -> "Verifying"
-                            else -> "Extracting"
-                        },
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = colors.accent
-                    )
+                    state is ModelDownloadState.Downloading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "${(state.progress * 100).toInt()}%",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.accent
+                        )
+                        IconButton(onClick = onPauseDownload, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.Pause,
+                                contentDescription = "Pause ${pack.name}",
+                                tint = colors.textSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(onClick = onCancelDownload, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel ${pack.name}",
+                                tint = colors.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    state is ModelDownloadState.Paused -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Paused • ${(state.progress * 100).toInt()}%",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.badgePurpleText
+                        )
+                        IconButton(onClick = onResumeDownload, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Resume ${pack.name}",
+                                tint = colors.accent,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(onClick = onCancelDownload, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel ${pack.name}",
+                                tint = colors.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    state is ModelDownloadState.Verifying -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Verifying",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.accent
+                        )
+                        IconButton(onClick = onCancelDownload, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel ${pack.name}",
+                                tint = colors.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    state is ModelDownloadState.Extracting -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Extracting",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.accent
+                        )
+                        IconButton(onClick = onCancelDownload, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Cancel ${pack.name}",
+                                tint = colors.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
 
                     state is ModelDownloadState.Error -> Button(
                         onClick = onDownload,
@@ -1197,27 +1276,47 @@ private fun LanguagePackRow(
                 }
             }
 
-            if (state is ModelDownloadState.Downloading) {
-                LinearProgressIndicator(
-                    progress = { state.progress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(CircleShape),
-                    color = colors.accent,
-                    trackColor = colors.outline
-                )
-                Text(
-                    text = "Downloading • ${formatSizeMb(state.progressBytes / (1024.0 * 1024.0))} / ${formatSizeMb(state.totalBytes / (1024.0 * 1024.0))} MB",
-                    fontSize = 10.sp,
-                    color = colors.textSecondary
-                )
-            } else if (state is ModelDownloadState.Error) {
-                Text(
-                    text = state.message,
-                    fontSize = 10.sp,
-                    color = colors.error
-                )
+            when (state) {
+                is ModelDownloadState.Downloading -> {
+                    LinearProgressIndicator(
+                        progress = { state.progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(CircleShape),
+                        color = colors.accent,
+                        trackColor = colors.outline
+                    )
+                    Text(
+                        text = "Downloading • ${formatSizeMb(state.progressBytes / (1024.0 * 1024.0))} / ${formatSizeMb(state.totalBytes / (1024.0 * 1024.0))} MB",
+                        fontSize = 10.sp,
+                        color = colors.textSecondary
+                    )
+                }
+                is ModelDownloadState.Paused -> {
+                    LinearProgressIndicator(
+                        progress = { state.progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(CircleShape),
+                        color = colors.badgePurpleText,
+                        trackColor = colors.outline
+                    )
+                    Text(
+                        text = "Paused • ${(state.progress * 100).toInt()}%",
+                        fontSize = 10.sp,
+                        color = colors.textSecondary
+                    )
+                }
+                is ModelDownloadState.Error -> {
+                    Text(
+                        text = state.message,
+                        fontSize = 10.sp,
+                        color = colors.error
+                    )
+                }
+                else -> Unit
             }
         }
     }

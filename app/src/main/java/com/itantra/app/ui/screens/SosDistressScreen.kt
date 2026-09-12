@@ -41,9 +41,13 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.HeadsetMic
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
@@ -55,6 +59,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
@@ -83,6 +88,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.itantra.app.model.SupportedLanguage
+import com.itantra.app.modelhub.ModelDownloadState
 import com.itantra.app.ui.theme.AccentBlue
 import com.itantra.app.ui.theme.AccentBlueContainer
 import com.itantra.app.ui.theme.BadgeIndigoContainer
@@ -123,6 +129,10 @@ fun SosDistressScreen(
     val connectedRescuer by viewModel.connectedRescuer.collectAsState()
     val audioLevel by viewModel.audioLevel.collectAsState()
     val selectedLanguage = uiState.selectedLanguage
+    val modelPacks by viewModel.modelPacks.collectAsState()
+    val selectedPack = modelPacks.firstOrNull { it.iso == selectedLanguage.code }
+    val selectedPackState = if (selectedPack?.isInstalled == true) ModelDownloadState.Installed
+        else (selectedPack?.downloadState ?: ModelDownloadState.Idle)
 
     val scrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
@@ -617,7 +627,17 @@ fun SosDistressScreen(
                                 color = colors.textPrimary
                             )
                             Text(
-                                text = "Bundle: ${selectedLanguage.downloadSizeMb} MB (STT + TTS on-device)",
+                                text = when (selectedPackState) {
+                                    is ModelDownloadState.Installed -> "Installed • On-device STT + TTS"
+                                    is ModelDownloadState.Downloading ->
+                                        "Downloading • ${(selectedPackState.progress * 100).toInt()}%"
+                                    is ModelDownloadState.Paused ->
+                                        "Paused • ${(selectedPackState.progress * 100).toInt()}%"
+                                    is ModelDownloadState.Verifying -> "Verifying • On-device STT + TTS"
+                                    is ModelDownloadState.Extracting -> "Extracting • On-device STT + TTS"
+                                    is ModelDownloadState.Error -> "Download failed • Tap Retry"
+                                    else -> "Not downloaded • ${formatSizeMb(selectedPack?.sizeMb ?: selectedLanguage.downloadSizeMb.toDouble())} MB"
+                                },
                                 fontSize = 12.sp,
                                 color = colors.textSecondary
                             )
@@ -1259,6 +1279,10 @@ fun SosDistressScreen(
                 ) {
                     items(filteredLanguages) { lang ->
                         val isSelected = selectedLanguage == lang
+                        val pack = modelPacks.firstOrNull { it.iso == lang.code }
+                        val state = if (pack?.isInstalled == true) ModelDownloadState.Installed
+                            else (pack?.downloadState ?: ModelDownloadState.Idle)
+                        val sizeMb = pack?.sizeMb ?: lang.downloadSizeMb.toDouble()
 
                         Box(
                             modifier = Modifier
@@ -1271,6 +1295,7 @@ fun SosDistressScreen(
                                     shape = RoundedCornerShape(16.dp)
                                 )
                                 .clickable {
+                                    // Row main click always selects the language + dismisses.
                                     viewModel.setSelectedLanguage(lang)
                                     scope.launch { sheetState.hide() }.invokeOnCompletion {
                                         showLanguageSheet = false
@@ -1278,82 +1303,271 @@ fun SosDistressScreen(
                                 }
                                 .padding(horizontal = 14.dp, vertical = 12.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    // Native Glyph Circle Avatar
-                                    Box(
-                                        modifier = Modifier
-                                            .size(42.dp)
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(
-                                                if (isSelected) colors.accent else colors.outline
-                                            ),
-                                        contentAlignment = Alignment.Center
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
                                     ) {
-                                        Text(
-                                            text = lang.nativeInitial,
-                                            fontSize = 16.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isSelected) Color.White else colors.textSecondary
-                                        )
-                                    }
-
-                                    Spacer(modifier = Modifier.width(12.dp))
-
-                                    Column {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                        // Native Glyph Avatar
+                                        Box(
+                                            modifier = Modifier
+                                                .size(42.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(
+                                                    when (state) {
+                                                        is ModelDownloadState.Installed -> colors.accent
+                                                        is ModelDownloadState.Downloading,
+                                                        is ModelDownloadState.Paused,
+                                                        is ModelDownloadState.Verifying,
+                                                        is ModelDownloadState.Extracting -> BadgeIndigoContainer
+                                                        else -> colors.outline
+                                                    }
+                                                ),
+                                            contentAlignment = Alignment.Center
+                                        ) {
                                             Text(
-                                                text = lang.englishName,
-                                                fontSize = 15.sp,
+                                                text = lang.nativeInitial,
+                                                fontSize = 16.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = if (isSelected) colors.accent else colors.textPrimary
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(
-                                                text = "(${lang.nativeName})",
-                                                fontSize = 14.sp,
-                                                color = if (isSelected) colors.accent else colors.textSecondary
+                                                color = if (isSelected || state is ModelDownloadState.Installed) Color.White else colors.textSecondary
                                             )
                                         }
 
-                                        Text(
-                                            text = "On-Device Size: ${lang.downloadSizeMb} MB (STT + TTS)",
-                                            fontSize = 12.sp,
-                                            color = if (isSelected) colors.accent.copy(alpha = 0.85f) else colors.textSecondary
-                                        )
+                                        Spacer(modifier = Modifier.width(12.dp))
+
+                                        Column {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = lang.englishName,
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isSelected) colors.accent else colors.textPrimary
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = "(${lang.nativeName})",
+                                                    fontSize = 14.sp,
+                                                    color = if (isSelected) colors.accent else colors.textSecondary
+                                                )
+                                            }
+
+                                            Text(
+                                                text = "On-Device Size: ${formatSizeMb(sizeMb)} MB (STT + TTS)",
+                                                fontSize = 12.sp,
+                                                color = if (isSelected) colors.accent.copy(alpha = 0.85f) else colors.textSecondary
+                                            )
+                                        }
+                                    }
+
+                                    // Trailing action, driven by the live download state.
+                                    when {
+                                        state is ModelDownloadState.Installed && isSelected -> {
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(colors.accent)
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Check,
+                                                        contentDescription = null,
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(12.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(3.dp))
+                                                    Text(
+                                                        text = "ACTIVE",
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = Color.White
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        state is ModelDownloadState.Installed -> {
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(colors.badgeMintContainer)
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            ) {
+                                                Text(
+                                                    text = "INSTALLED",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = colors.badgeMintText
+                                                )
+                                            }
+                                        }
+
+                                        state is ModelDownloadState.Downloading -> {
+                                            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                IconButton(
+                                                    onClick = { viewModel.pauseModelDownload(lang.languageTag) },
+                                                    modifier = Modifier.size(30.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Pause,
+                                                        contentDescription = "Pause ${lang.englishName}",
+                                                        tint = colors.textSecondary,
+                                                        modifier = Modifier.size(17.dp)
+                                                    )
+                                                }
+                                                IconButton(
+                                                    onClick = { viewModel.cancelModelDownload(lang.languageTag) },
+                                                    modifier = Modifier.size(30.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Cancel,
+                                                        contentDescription = "Cancel ${lang.englishName}",
+                                                        tint = SosRedDark,
+                                                        modifier = Modifier.size(17.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        state is ModelDownloadState.Paused -> {
+                                            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                IconButton(
+                                                    onClick = { viewModel.downloadModel(lang.languageTag) },
+                                                    modifier = Modifier.size(30.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.PlayArrow,
+                                                        contentDescription = "Resume ${lang.englishName}",
+                                                        tint = colors.accent,
+                                                        modifier = Modifier.size(17.dp)
+                                                    )
+                                                }
+                                                IconButton(
+                                                    onClick = { viewModel.cancelModelDownload(lang.languageTag) },
+                                                    modifier = Modifier.size(30.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Cancel,
+                                                        contentDescription = "Cancel ${lang.englishName}",
+                                                        tint = SosRedDark,
+                                                        modifier = Modifier.size(17.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        state is ModelDownloadState.Verifying || state is ModelDownloadState.Extracting -> {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = if (state is ModelDownloadState.Verifying) "Verifying…" else "Extracting…",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = colors.accent
+                                                )
+                                                IconButton(
+                                                    onClick = { viewModel.cancelModelDownload(lang.languageTag) },
+                                                    modifier = Modifier.size(30.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Cancel,
+                                                        contentDescription = "Cancel ${lang.englishName}",
+                                                        tint = SosRedDark,
+                                                        modifier = Modifier.size(17.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        state is ModelDownloadState.Error -> {
+                                            Text(
+                                                text = "Retry",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = colors.error,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(colors.errorContainer)
+                                                    .clickable { viewModel.downloadModel(lang.languageTag) }
+                                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                            )
+                                        }
+
+                                        else -> {
+                                            // Idle or Cancelled — offer the download.
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(colors.accent)
+                                                    .clickable { viewModel.downloadModel(lang.languageTag) }
+                                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Download,
+                                                    contentDescription = null,
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = "Download • ${formatSizeMb(sizeMb)} MB",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color.White
+                                                )
+                                            }
+                                        }
                                     }
                                 }
 
-                                if (isSelected) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(colors.accent)
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                    ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(
-                                                imageVector = Icons.Default.Check,
-                                                contentDescription = null,
-                                                tint = Color.White,
-                                                modifier = Modifier.size(12.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(3.dp))
-                                            Text(
-                                                text = "ACTIVE",
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color.White
-                                            )
-                                        }
+                                // Progress / status line below the row.
+                                when (state) {
+                                    is ModelDownloadState.Downloading -> {
+                                        LinearProgressIndicator(
+                                            progress = { state.progress },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(4.dp)
+                                                .clip(CircleShape),
+                                            color = colors.accent,
+                                            trackColor = colors.outline
+                                        )
+                                        Text(
+                                            text = "${(state.progress * 100).toInt()}% • ${formatSizeMb(state.progressBytes / (1024.0 * 1024.0))} / ${formatSizeMb(state.totalBytes / (1024.0 * 1024.0))} MB",
+                                            fontSize = 11.sp,
+                                            color = colors.textSecondary
+                                        )
                                     }
+                                    is ModelDownloadState.Paused -> {
+                                        LinearProgressIndicator(
+                                            progress = { state.progress },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(4.dp)
+                                                .clip(CircleShape),
+                                            color = colors.badgePurpleText,
+                                            trackColor = colors.outline
+                                        )
+                                        Text(
+                                            text = "PAUSED • ${(state.progress * 100).toInt()}%",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = colors.badgePurpleText
+                                        )
+                                    }
+                                    is ModelDownloadState.Error -> {
+                                        Text(
+                                            text = state.message,
+                                            fontSize = 11.sp,
+                                            color = SosRedDark
+                                        )
+                                    }
+                                    else -> Unit
                                 }
                             }
                         }
@@ -1365,3 +1579,7 @@ fun SosDistressScreen(
         }
     }
 }
+
+/** Formats a size in MiB to one decimal place for compact UI labels. */
+private fun formatSizeMb(sizeMb: Double): String =
+    String.format(java.util.Locale.US, "%.1f", sizeMb)
