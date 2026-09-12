@@ -63,6 +63,7 @@ import com.itantra.app.ui.components.MissionDestination
 import com.itantra.app.ui.screens.RescueScreen
 import com.itantra.app.ui.screens.SettingsScreen
 import com.itantra.app.ui.screens.SosDistressScreen
+import com.itantra.app.ui.screens.OnboardingScreen
 import com.itantra.app.ui.screens.WalkieScreen
 import com.itantra.app.ui.theme.MinimalColorsInstance
 import com.itantra.app.ui.theme.MyApplicationTheme
@@ -108,7 +109,14 @@ class MainActivity : ComponentActivity() {
             }
 
             MyApplicationTheme(darkTheme = isDark) {
-                MainAppContent(viewModel = viewModel)
+                if (!uiState.isOnboardingCompleted) {
+                    OnboardingScreen(
+                        viewModel = viewModel,
+                        onContinue = { /* DataStore auto-updates uiState */ }
+                    )
+                } else {
+                    MainAppContent(viewModel = viewModel)
+                }
             }
         }
     }

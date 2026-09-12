@@ -35,7 +35,14 @@ data class AppSettings(
     val keepScreenAwake: Boolean = true,
     val zeroLogPrivacy: Boolean = false,
     val forceMaxVolumeAlerts: Boolean = true,
-    val isLowPowerListeningEnabled: Boolean = true
+    val isLowPowerListeningEnabled: Boolean = true,
+    val userName: String = "",
+    val userAge: Int? = null,
+    val userGender: String = "Male",
+    val userLanguages: Set<String> = setOf("hi", "en"),
+    val relativeRelation: String = "Parent",
+    val relativePhone: String = "",
+    val isOnboardingCompleted: Boolean = false
 ) {
     companion object {
         const val DEFAULT_THEME_MODE = "light"
@@ -71,6 +78,13 @@ class SettingsRepository(context: Context) {
         val LOW_POWER_LISTENING = booleanPreferencesKey("low_power_listening")
         val INSTALLED_MODEL_TAGS = stringSetPreferencesKey("installed_model_tags")
         val NODE_ID = longPreferencesKey("node_id")
+        val USER_NAME = stringPreferencesKey("user_name")
+        val USER_AGE = intPreferencesKey("user_age")
+        val USER_GENDER = stringPreferencesKey("user_gender")
+        val USER_LANGUAGES = stringSetPreferencesKey("user_languages")
+        val RELATIVE_RELATION = stringPreferencesKey("relative_relation")
+        val RELATIVE_PHONE = stringPreferencesKey("relative_phone")
+        val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -88,7 +102,14 @@ class SettingsRepository(context: Context) {
                 keepScreenAwake = prefs[Keys.KEEP_SCREEN_AWAKE] ?: true,
                 zeroLogPrivacy = prefs[Keys.ZERO_LOG_PRIVACY] ?: false,
                 forceMaxVolumeAlerts = prefs[Keys.FORCE_MAX_VOLUME_ALERTS] ?: true,
-                isLowPowerListeningEnabled = prefs[Keys.LOW_POWER_LISTENING] ?: true
+                isLowPowerListeningEnabled = prefs[Keys.LOW_POWER_LISTENING] ?: true,
+                userName = prefs[Keys.USER_NAME] ?: "",
+                userAge = prefs[Keys.USER_AGE],
+                userGender = prefs[Keys.USER_GENDER] ?: "Male",
+                userLanguages = prefs[Keys.USER_LANGUAGES] ?: setOf("hi", "en"),
+                relativeRelation = prefs[Keys.RELATIVE_RELATION] ?: "Parent",
+                relativePhone = prefs[Keys.RELATIVE_PHONE] ?: "",
+                isOnboardingCompleted = prefs[Keys.ONBOARDING_COMPLETED] ?: false
             )
         }
         .stateIn(scope, SharingStarted.Eagerly, AppSettings())
@@ -128,6 +149,35 @@ class SettingsRepository(context: Context) {
     suspend fun setForceMaxVolumeAlerts(value: Boolean) = put(Keys.FORCE_MAX_VOLUME_ALERTS, value)
     suspend fun setLowPowerListeningEnabled(value: Boolean) = put(Keys.LOW_POWER_LISTENING, value)
     suspend fun setInstalledLanguageTags(value: Set<String>) = put(Keys.INSTALLED_MODEL_TAGS, value)
+    suspend fun setUserName(value: String) = put(Keys.USER_NAME, value)
+    suspend fun setUserAge(value: Int?) = if (value != null) put(Keys.USER_AGE, value) else appContext.itantraSettingsDataStore.edit { it.remove(Keys.USER_AGE) }
+    suspend fun setUserGender(value: String) = put(Keys.USER_GENDER, value)
+    suspend fun setUserLanguages(value: Set<String>) = put(Keys.USER_LANGUAGES, value)
+    suspend fun setRelativeRelation(value: String) = put(Keys.RELATIVE_RELATION, value)
+    suspend fun setRelativePhone(value: String) = put(Keys.RELATIVE_PHONE, value)
+    suspend fun setOnboardingCompleted(value: Boolean) = put(Keys.ONBOARDING_COMPLETED, value)
+
+    suspend fun saveOnboardingProfile(
+        name: String,
+        age: Int?,
+        gender: String,
+        languages: Set<String>,
+        relation: String,
+        phone: String
+    ) {
+        appContext.itantraSettingsDataStore.edit { prefs ->
+            prefs[Keys.USER_NAME] = name
+            if (age != null) prefs[Keys.USER_AGE] = age else prefs.remove(Keys.USER_AGE)
+            prefs[Keys.USER_GENDER] = gender
+            prefs[Keys.USER_LANGUAGES] = languages
+            prefs[Keys.RELATIVE_RELATION] = relation
+            prefs[Keys.RELATIVE_PHONE] = phone
+            prefs[Keys.ONBOARDING_COMPLETED] = true
+            if (name.isNotBlank()) {
+                prefs[Keys.CALLSIGN] = name.trim().uppercase().replace(Regex("\\s+"), "-").take(18)
+            }
+        }
+    }
 
     /**
      * Emergency wipe: removes every persisted preference. Both hot flows

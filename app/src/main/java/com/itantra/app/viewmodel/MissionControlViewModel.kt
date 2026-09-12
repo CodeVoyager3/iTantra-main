@@ -88,7 +88,14 @@ data class MissionUiState(
     val keepScreenAwake: Boolean = true,
     val showArmDistressDialog: Boolean = false,
     val directIpInput: String = "",
-    val themeMode: String = "light" // Default to bright theme
+    val themeMode: String = "light", // Default to bright theme
+    val isOnboardingCompleted: Boolean = false,
+    val userName: String = "",
+    val userAge: Int? = null,
+    val userGender: String = "Male",
+    val userLanguages: Set<String> = setOf("hi", "en"),
+    val relativeRelation: String = "Parent",
+    val relativePhone: String = ""
 )
 
 /**
@@ -1455,7 +1462,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                         themeMode = s.themeMode,
                         forceMaxVolumeAlerts = s.forceMaxVolumeAlerts,
                         isLowPowerListeningEnabled = s.isLowPowerListeningEnabled,
-                        keepScreenAwake = s.keepScreenAwake
+                        keepScreenAwake = s.keepScreenAwake,
+                        isOnboardingCompleted = s.isOnboardingCompleted,
+                        userName = s.userName,
+                        userAge = s.userAge,
+                        userGender = s.userGender,
+                        userLanguages = s.userLanguages,
+                        relativeRelation = s.relativeRelation,
+                        relativePhone = s.relativePhone
                     )
                 }
                 _callsign.value = s.callsign
@@ -1467,6 +1481,29 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 _keepScreenAwake.value = s.keepScreenAwake
                 _zeroLogPrivacy.value = s.zeroLogPrivacy
                 audioCaptureEngine?.noiseSuppressionEnabled = s.noiseSuppressionEnabled
+            }
+        }
+    }
+
+    fun completeOnboarding(
+        name: String,
+        age: Int?,
+        gender: String,
+        languages: Set<String>,
+        relation: String,
+        phone: String
+    ) {
+        viewModelScope.launch {
+            settingsRepository.saveOnboardingProfile(
+                name = name,
+                age = age,
+                gender = gender,
+                languages = languages,
+                relation = relation,
+                phone = phone
+            )
+            languages.firstOrNull()?.let { code ->
+                setSelectedLanguage(SupportedLanguage.fromCode(code))
             }
         }
     }
