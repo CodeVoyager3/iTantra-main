@@ -93,6 +93,16 @@ class AudioPlaybackEngine(context: Context) {
         }
     }
 
+    /** Silences any active beacon / siren tone track immediately. */
+    fun stopTones() {
+        runCatching {
+            toneTrack?.pause()
+            toneTrack?.flush()
+            toneTrack?.release()
+        }
+        toneTrack = null
+    }
+
     /**
      * Routes future playback: true = STREAM_MUSIC over the loudspeaker,
      * false = STREAM_VOICE_CALL with MODE_IN_COMMUNICATION + speakerphone on.

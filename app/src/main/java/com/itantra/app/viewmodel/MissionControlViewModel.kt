@@ -18,6 +18,8 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
+import java.util.Locale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.itantra.app.ai.OnnxInferenceManager
@@ -523,7 +525,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private fun buildRescuerBeaconPayload(): DistressBeaconPayload {
         val targetNodeId = when {
             _isBroadcastingToAll.value -> -1
-            _connectedVictimIntercom.value != null -> (_connectedVictimIntercom.value!!.nodeId and 0x7FFF).toInt()
+            _connectedVictimIntercom.value != null -> ((_connectedVictimIntercom.value!!.nodeId and 0x3FFF) + 1).toInt()
             else -> 0
         }
         return DistressBeaconPayload(
@@ -982,19 +984,21 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _nearbyRescuers.value = rescuerBeacons.map { it.toRescuerNode() }
 
             // Check if any rescuer is actively connecting to us or broadcasting
-            val myTargetMask = (_nodeId.value and 0x7FFF).toInt()
+            val myTargetMask = ((_nodeId.value and 0x3FFF) + 1).toInt()
             val callingRescuer = rescuerBeacons.firstOrNull {
                 it.altitudeMeters == -1 || it.altitudeMeters == myTargetMask
             }
             if (callingRescuer != null) {
                 val node = callingRescuer.toRescuerNode().copy(isConnected = true)
-                if (_connectedRescuer.value?.id != node.id) {
-                    _connectedRescuer.value = node
-                    startMeshVoiceCapture()
-                }
+                _connectedRescuer.value = node
+                lastRescuerContactEpochMs = System.currentTimeMillis()
+                startMeshVoiceCapture()
             } else if (_connectedRescuer.value != null) {
-                _connectedRescuer.value = null
-                stopMeshVoiceCaptureIfIdle()
+                // If neither BLE beacon nor recent UDP contact in the last 4 seconds, mark disconnected
+                if (System.currentTimeMillis() - lastRescuerContactEpochMs > 4000L) {
+                    _connectedRescuer.value = null
+                    stopMeshVoiceCaptureIfIdle()
+                }
             }
         }
         if (_isWalkieActive.value) {
@@ -1022,12 +1026,15 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    private var lastRescuerContactEpochMs = 0L
     private val recentRelayedPackets = LinkedHashSet<Long>()
 
     private fun handleIncomingDatagram(bytes: ByteArray) {
         val packet = PacketFraming.decode(bytes) ?: return
+        // Never process our own packets (prevents loopback echo)
+        if (packet.nodeId == _nodeId.value) return
 
-        // Multi-hop mesh relay: forward packets with TTL > 1 that originated elsewhere
+        // Multi-hop mesh relay: deduplicate and forward packets with TTL > 1
         val packetSignature = ((packet.nodeId xor (packet.msgType.toLong() shl 16)) xor packet.payload.contentHashCode().toLong())
         val isAlreadySeen = synchronized(recentRelayedPackets) {
             if (recentRelayedPackets.contains(packetSignature)) {
@@ -1041,14 +1048,16 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 false
             }
         }
+        if (isAlreadySeen) return // Deduplicate
 
-        if (!isAlreadySeen && packet.nodeId != _nodeId.value && packet.ttl > 1) {
+        if (packet.ttl > 1) {
             val relayedPacket = packet.copy(ttl = packet.ttl - 1)
             wifiDirectMeshManager?.broadcastDatagram(PacketFraming.encode(relayedPacket))
         }
 
         when (packet.msgType) {
             PacketFraming.MSG_TYPE_TRANSLATED_TEXT -> {
+                lastRescuerContactEpochMs = System.currentTimeMillis()
                 val rawPayload = String(packet.payload, Charsets.UTF_8)
                 val (langCode, text) = if (rawPayload.contains('|')) {
                     val parts = rawPayload.split('|', limit = 2)
@@ -1083,7 +1092,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 }
             }
             PacketFraming.MSG_TYPE_VOICE_FRAME -> {
-                // Fallback support for legacy raw voice frame
+                lastRescuerContactEpochMs = System.currentTimeMillis()
                 audioPlaybackEngine?.play(packet.payload, AudioCaptureEngine.SAMPLE_RATE_HZ)
                 _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
                 _audioLevel.value = calculateRmsLevel(packet.payload)
@@ -1092,6 +1101,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 // A rescuer is opening an intercom toward this device (we are
                 // the victim). Mark them connected!
                 if (_isSosBroadcasting.value) {
+                    lastRescuerContactEpochMs = System.currentTimeMillis()
                     val rescuerId = "resc-${packet.nodeId}"
                     val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
                     _connectedRescuer.value = existing?.copy(isConnected = true)
@@ -1274,7 +1284,11 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 msgType = PacketFraming.MSG_TYPE_TRANSLATED_TEXT,
                 payload = payloadString.toByteArray(Charsets.UTF_8)
             )
-            wifiDirectMeshManager?.broadcastDatagram(PacketFraming.encode(textPacket))
+            val encoded = PacketFraming.encode(textPacket)
+            repeat(3) {
+                wifiDirectMeshManager?.broadcastDatagram(encoded)
+                delay(40)
+            }
         }
     }
 
@@ -1335,17 +1349,28 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     private fun speakWithSystemTts(text: String, langCode: String) {
-        val tts = systemTts ?: return
+        val tts = systemTts ?: run {
+            Log.e("MissionControl", "systemTts is null, cannot speak")
+            return
+        }
         val audioManager = getApplication<Application>().getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         try {
             audioManager?.isSpeakerphoneOn = true
             audioManager?.mode = AudioManager.MODE_NORMAL
+            val maxVol = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 0
+            val curVol = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
+            if (maxVol > 0 && curVol < (maxVol * 0.8f).toInt()) {
+                audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, (maxVol * 0.85f).toInt(), 0)
+            }
             val targetLocale = SupportedLanguage.fromCode(langCode).locale
-            tts.language = targetLocale
+            val langResult = tts.setLanguage(targetLocale)
+            if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts.language = Locale.getDefault()
+            }
             tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
-                    _audioLevel.value = 0.65f
+                    _audioLevel.value = 0.75f
                 }
                 override fun onDone(utteranceId: String?) {
                     _audioLevel.value = 0f
@@ -1361,7 +1386,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
             }
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "itantra_${System.currentTimeMillis()}")
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("MissionControl", "Error in speakWithSystemTts", e)
             _audioLevel.value = 0f
         }
     }
@@ -1437,12 +1463,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             // Two-tone siren loop while SOS remains active (mutes when rescuer or intercom connects).
             while (_isSosBroadcasting.value && isActive) {
                 if (_connectedRescuer.value != null || _connectedVictimIntercom.value != null) {
+                    playback.stopTones()
                     delay(400)
                     continue
                 }
                 playback.playTone(880f, 320, 0.9f)
                 delay(400)
                 if (_connectedRescuer.value != null || _connectedVictimIntercom.value != null) {
+                    playback.stopTones()
                     delay(400)
                     continue
                 }

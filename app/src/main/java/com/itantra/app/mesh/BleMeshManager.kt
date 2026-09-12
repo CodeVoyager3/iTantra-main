@@ -264,6 +264,8 @@ class BleMeshManager(context: Context) {
     // ADVERTISER — distress beacon transmission
     // =========================================================================
 
+    private var currentBeacon: DistressBeaconPayload? = null
+
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             _isAdvertising.value = true
@@ -271,7 +273,13 @@ class BleMeshManager(context: Context) {
         }
 
         override fun onStartFailure(errorCode: Int) {
+            if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED) {
+                _isAdvertising.value = true
+                Log.w("BleMeshManager", "BLE beacon advertising already active")
+                return
+            }
             _isAdvertising.value = false
+            currentBeacon = null
             Log.e("BleMeshManager", "BLE beacon advertising failed, errorCode: $errorCode")
             onAdvertisingFailed?.invoke(
                 AdvertiseFailure(errorCode, "BLE advertise start failed, code $errorCode")
@@ -292,7 +300,7 @@ class BleMeshManager(context: Context) {
         beacon: DistressBeaconPayload,
         txPower: BeaconTxPower = BeaconTxPower.HIGH
     ): Boolean {
-        if (_isAdvertising.value) return true
+        if (_isAdvertising.value && currentBeacon == beacon) return true
         if (!hasBleAdvertise()) {
             onAdvertisingFailed?.invoke(
                 AdvertiseFailure(
@@ -307,6 +315,13 @@ class BleMeshManager(context: Context) {
         } catch (_: SecurityException) {
             null
         } ?: return false
+
+        // Stop prior advertising if payload changed
+        if (_isAdvertising.value || currentBeacon != null) {
+            runCatching { advertiser.stopAdvertising(advertiseCallback) }
+            _isAdvertising.value = false
+        }
+
         return try {
             val settings = AdvertiseSettings.Builder()
                 .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
@@ -327,10 +342,12 @@ class BleMeshManager(context: Context) {
                 .addServiceUuid(ParcelUuid(SERVICE_UUID))
                 .build()
             advertiser.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
+            currentBeacon = beacon
             _isAdvertising.value = true
             true
         } catch (t: Throwable) {
             _isAdvertising.value = false
+            currentBeacon = null
             onAdvertisingFailed?.invoke(
                 AdvertiseFailure(
                     AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR,
@@ -344,6 +361,7 @@ class BleMeshManager(context: Context) {
     fun stopAdvertising() {
         runCatching { bluetoothAdapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) }
         _isAdvertising.value = false
+        currentBeacon = null
     }
 
     // =========================================================================

@@ -36,16 +36,16 @@ class AudioCaptureEngine(context: Context) {
         const val FRAME_SHORTS = FRAME_BYTES / 2 // 320
 
         /** Margin (dB) above the noise floor required to trigger speech. */
-        private const val SPEECH_TRIGGER_DB = 14.0
+        private const val SPEECH_TRIGGER_DB = 10.0
 
         /** Number of consecutive loud frames before speech is declared. */
-        private const val SPEECH_TRIGGER_FRAMES = 3
+        private const val SPEECH_TRIGGER_FRAMES = 2
 
         /** Margin (dB) below which speech is considered ended. */
-        private const val SPEECH_RELEASE_DB = 6.0
+        private const val SPEECH_RELEASE_DB = 4.0
 
         /** Silence duration (ms) before an end-of-turn event fires. */
-        private const val END_OF_TURN_MS = 500L
+        private const val END_OF_TURN_MS = 450L
 
         /** Floor for the adaptive noise estimate, in raw RMS units. */
         private const val MIN_NOISE_FLOOR = 10.0

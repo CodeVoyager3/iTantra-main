@@ -54,9 +54,11 @@ class OnnxInferenceManager(context: Context) {
     private var ortEnv: OrtEnvironment? = null
     private var sttSession: OrtSession? = null
     private var sttVocab: List<String> = emptyList()
+    private var loadedSttTag: String? = null
 
     private var fastPitchSession: OrtSession? = null
     private var hifiGanSession: OrtSession? = null
+    private var loadedTtsTag: String? = null
 
     private val _isSttLoaded = MutableStateFlow(false)
     val isSttLoaded: StateFlow<Boolean> = _isSttLoaded.asStateFlow()
@@ -111,8 +113,16 @@ class OnnxInferenceManager(context: Context) {
      *
      * @return true when both the session and the vocab are ready.
      */
+    /**
+     * Loads the STT model + vocab for [languageTag].
+     *
+     * @return true when both the session and the vocab are ready.
+     */
     @Synchronized
     fun loadStt(languageTag: String): Boolean {
+        if (_isSttLoaded.value && loadedSttTag == languageTag && sttSession != null) {
+            return true
+        }
         closeSttLocked()
         val env = ensureEnvironment() ?: return false
         val sttDir = resolveModelSubdir(languageTag, "stt") ?: return false
@@ -122,6 +132,7 @@ class OnnxInferenceManager(context: Context) {
             val vocabFile = File(sttDir, STT_VOCAB_FILE)
             sttSession = session
             sttVocab = if (vocabFile.exists()) parseVocab(vocabFile.readText()) else emptyList()
+            loadedSttTag = languageTag
             _isSttLoaded.value = true
             true
         } catch (_: Throwable) {
@@ -138,6 +149,9 @@ class OnnxInferenceManager(context: Context) {
      */
     @Synchronized
     fun loadTts(languageTag: String): Boolean {
+        if (_isTtsLoaded.value && loadedTtsTag == languageTag && fastPitchSession != null && hifiGanSession != null) {
+            return true
+        }
         closeTtsLocked()
         val env = ensureEnvironment() ?: return false
         val ttsDir = resolveModelSubdir(languageTag, "tts") ?: return false
@@ -149,6 +163,7 @@ class OnnxInferenceManager(context: Context) {
             val hg = env.createSession(hifiGanFile.absolutePath, buildSessionOptions())
             fastPitchSession = fp
             hifiGanSession = hg
+            loadedTtsTag = languageTag
             _isTtsLoaded.value = true
             true
         } catch (_: Throwable) {
@@ -409,6 +424,7 @@ class OnnxInferenceManager(context: Context) {
         runCatching { sttSession?.close() }
         sttSession = null
         sttVocab = emptyList()
+        loadedSttTag = null
         _isSttLoaded.value = false
     }
 
@@ -417,6 +433,7 @@ class OnnxInferenceManager(context: Context) {
         runCatching { hifiGanSession?.close() }
         fastPitchSession = null
         hifiGanSession = null
+        loadedTtsTag = null
         _isTtsLoaded.value = false
     }
 }

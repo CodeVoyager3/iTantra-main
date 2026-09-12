@@ -128,6 +128,7 @@ fun SosDistressScreen(
     val nearbyRescuers by viewModel.nearbyRescuers.collectAsState()
     val connectedRescuer by viewModel.connectedRescuer.collectAsState()
     val audioLevel by viewModel.audioLevel.collectAsState()
+    val modelWarning by viewModel.modelWarningMessage.collectAsState()
     val selectedLanguage = uiState.selectedLanguage
     val modelPacks by viewModel.modelPacks.collectAsState()
     val selectedPack = modelPacks.firstOrNull { it.iso == selectedLanguage.code }
@@ -752,6 +753,54 @@ fun SosDistressScreen(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // Model Download Warning Banner (if model pack is missing for voice transcription)
+                if (modelWarning != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (colors.isDark) Color(0xFF451A03) else Color(0xFFFEF3C7))
+                            .border(1.dp, Color(0xFFD97706), RoundedCornerShape(14.dp))
+                            .padding(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = Color(0xFFD97706),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = modelWarning ?: "",
+                                    fontSize = 11.sp,
+                                    color = if (colors.isDark) Color(0xFFFDE68A) else Color(0xFF92400E),
+                                    lineHeight = 15.sp
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.dismissModelWarning() },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Dismiss",
+                                    tint = if (colors.isDark) Color(0xFFFDE68A) else Color(0xFF92400E),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Live Connected Rescuer Tile
                 if (connectedRescuer != null) {
                     val rescuer = connectedRescuer!!
