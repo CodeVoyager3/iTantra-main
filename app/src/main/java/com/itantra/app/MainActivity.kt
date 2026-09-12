@@ -1,9 +1,12 @@
 package com.itantra.app
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -26,6 +29,8 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -33,6 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -48,6 +54,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.itantra.app.ui.components.MissionBottomNav
 import com.itantra.app.ui.components.MissionDestination
@@ -57,6 +66,8 @@ import com.itantra.app.ui.screens.SosDistressScreen
 import com.itantra.app.ui.screens.WalkieScreen
 import com.itantra.app.ui.theme.MinimalColorsInstance
 import com.itantra.app.ui.theme.MyApplicationTheme
+import com.itantra.app.ui.theme.RescueAmber
+import com.itantra.app.ui.theme.SosRed
 import com.itantra.app.viewmodel.MissionControlViewModel
 
 class MainActivity : ComponentActivity() {
@@ -149,9 +160,63 @@ fun MainAppContent(viewModel: MissionControlViewModel) {
         }
     }
 
+    var isBluetoothEnabled by remember { mutableStateOf(viewModel.isBluetoothEnabled()) }
+    var isLocationEnabled by remember { mutableStateOf(viewModel.isLocationEnabled()) }
+
+    val enableBtLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        val btNow = viewModel.isBluetoothEnabled()
+        isBluetoothEnabled = btNow
+        if (btNow) {
+            viewModel.onBluetoothStateRestored()
+        }
+    }
+
+    val enableLocLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        isLocationEnabled = viewModel.isLocationEnabled()
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val btNow = viewModel.isBluetoothEnabled()
+                val locNow = viewModel.isLocationEnabled()
+                val btRestored = !isBluetoothEnabled && btNow
+                isBluetoothEnabled = btNow
+                isLocationEnabled = locNow
+                if (btRestored) {
+                    viewModel.onBluetoothStateRestored()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     // Default to the 1st primary mode: SOS
     var currentDestination by remember { mutableStateOf(MissionDestination.SOS) }
     val alertCount by viewModel.victimAlertCount.collectAsState()
+    val isSosBroadcasting by viewModel.isSosBroadcasting.collectAsState()
+    val isRescueActive by viewModel.isRescueActive.collectAsState()
+
+    // Proactively prompt user to turn on Bluetooth if entering an active mesh mode
+    LaunchedEffect(currentDestination, isSosBroadcasting, isRescueActive) {
+        val needsBle = currentDestination == MissionDestination.SOS ||
+            currentDestination == MissionDestination.RESCUE ||
+            isSosBroadcasting ||
+            isRescueActive
+        if (needsBle && !viewModel.isBluetoothEnabled()) {
+            try {
+                enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            } catch (_: Exception) {}
+        }
+    }
 
     Scaffold(
         contentWindowInsets = WindowInsets.systemBars,
@@ -221,6 +286,126 @@ fun MainAppContent(viewModel: MissionControlViewModel) {
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Text("Grant", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                // Bluetooth Disabled Banner
+                if (!isBluetoothEnabled) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 18.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(colors.surface)
+                            .border(1.dp, SosRed.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                            .padding(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Bluetooth,
+                                    contentDescription = null,
+                                    tint = SosRed,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = "Bluetooth is turned OFF",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary
+                                    )
+                                    Text(
+                                        text = "Turn ON to broadcast SOS & detect nearby devices",
+                                        fontSize = 12.sp,
+                                        color = colors.textSecondary
+                                    )
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    try {
+                                        enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+                                    } catch (_: Exception) {}
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = SosRed,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("Turn On", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                // Location Services Disabled Banner (Android BLE requirement)
+                if (!isLocationEnabled) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 18.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(colors.surface)
+                            .border(1.dp, RescueAmber.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                            .padding(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.LocationOn,
+                                    contentDescription = null,
+                                    tint = RescueAmber,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = "Location (GPS) is turned OFF",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary
+                                    )
+                                    Text(
+                                        text = "Android OS requires Location ON for peer discovery",
+                                        fontSize = 12.sp,
+                                        color = colors.textSecondary
+                                    )
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    try {
+                                        enableLocLauncher.launch(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                                    } catch (_: Exception) {}
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = RescueAmber,
+                                    contentColor = Color.Black
+                                ),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("Turn On", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }

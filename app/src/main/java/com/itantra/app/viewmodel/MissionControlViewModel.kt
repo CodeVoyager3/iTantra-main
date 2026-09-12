@@ -332,6 +332,22 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         stopMeshUdpIfIdle()
     }
 
+    fun isBluetoothEnabled(): Boolean = bleMeshManager?.isBluetoothEnabled() ?: false
+    fun isLocationEnabled(): Boolean = bleMeshManager?.isLocationEnabled() ?: false
+
+    fun onBluetoothStateRestored() {
+        if (_isSosBroadcasting.value) {
+            startBeaconAdvertising(buildDistressBeaconPayload())
+            bleMeshManager?.startScanning()
+        }
+        if (_isRescueActive.value) {
+            bleMeshManager?.startScanning()
+        }
+        if (_isWalkieActive.value) {
+            bleMeshManager?.startScanning()
+        }
+    }
+
     // =========================================================================
     // 2. WALKIE-TALKIE MODE (Group Comms & Remembered Nodes)
     // =========================================================================

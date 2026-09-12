@@ -14,8 +14,10 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.Build
 import android.os.ParcelUuid
+import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -220,6 +222,24 @@ class BleMeshManager(context: Context) {
         }
     }
 
+    fun isBluetoothEnabled(): Boolean = try {
+        bluetoothAdapter?.isEnabled == true
+    } catch (_: Exception) {
+        false
+    }
+
+    fun isLocationEnabled(): Boolean = try {
+        val lm = appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            lm.isLocationEnabled
+        } else {
+            lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        }
+    } catch (_: Exception) {
+        false
+    }
+
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(appContext, permission) == PackageManager.PERMISSION_GRANTED
 
@@ -246,10 +266,12 @@ class BleMeshManager(context: Context) {
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             _isAdvertising.value = true
+            Log.i("BleMeshManager", "BLE beacon advertising started successfully")
         }
 
         override fun onStartFailure(errorCode: Int) {
             _isAdvertising.value = false
+            Log.e("BleMeshManager", "BLE beacon advertising failed, errorCode: $errorCode")
             onAdvertisingFailed?.invoke(
                 AdvertiseFailure(errorCode, "BLE advertise start failed, code $errorCode")
             )
@@ -258,6 +280,10 @@ class BleMeshManager(context: Context) {
 
     /**
      * Starts advertising [beacon] as iTantra manufacturer data.
+     *
+     * Adheres strictly to the 31-byte legacy BLE limit:
+     *  - Primary AdvertiseData: 22-byte manufacturer payload + 2-byte ID (26 bytes total, under 31)
+     *  - ScanResponse: 128-bit Service UUID + TX Power (21 bytes total, under 31)
      *
      * @return true when advertising was handed to the platform successfully.
      */
@@ -287,16 +313,19 @@ class BleMeshManager(context: Context) {
                 .setConnectable(false)
                 .setTimeout(0)
                 .build()
-            val data = AdvertiseData.Builder()
+            val advertiseData = AdvertiseData.Builder()
                 .setIncludeDeviceName(false)
-                .setIncludeTxPowerLevel(true)
-                .addServiceUuid(ParcelUuid(SERVICE_UUID))
+                .setIncludeTxPowerLevel(false)
                 .addManufacturerData(
                     DistressBeaconPayload.MANUFACTURER_ID,
                     beacon.toManufacturerData()
                 )
                 .build()
-            advertiser.startAdvertising(settings, data, advertiseCallback)
+            val scanResponse = AdvertiseData.Builder()
+                .setIncludeTxPowerLevel(true)
+                .addServiceUuid(ParcelUuid(SERVICE_UUID))
+                .build()
+            advertiser.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
             _isAdvertising.value = true
             true
         } catch (t: Throwable) {
@@ -331,6 +360,7 @@ class BleMeshManager(context: Context) {
 
         override fun onScanFailed(errorCode: Int) {
             _isScanning.value = false
+            Log.e("BleMeshManager", "BLE scan failed, errorCode: $errorCode")
         }
     }
 
@@ -340,6 +370,11 @@ class BleMeshManager(context: Context) {
             val payloadBytes = record.getManufacturerSpecificData(DistressBeaconPayload.MANUFACTURER_ID)
                 ?: return
             val payload = DistressBeaconPayload.parseManufacturerData(payloadBytes) ?: return
+
+            Log.d(
+                "BleMeshManager",
+                "Discovered iTantra beacon: node=${payload.nodeId}, distress=${payload.isDistress}, rssi=${result.rssi}"
+            )
 
             val tracker = synchronized(trackers) {
                 trackers.getOrPut(payload.nodeId) {
@@ -363,8 +398,8 @@ class BleMeshManager(context: Context) {
                 latest[beacon.nodeId] = beacon
                 publishBeaconsLocked()
             }
-        } catch (_: Exception) {
-            // Malformed or hostile advertisement — ignore it.
+        } catch (e: Exception) {
+            Log.w("BleMeshManager", "Error handling scan result", e)
         }
     }
 
@@ -379,24 +414,32 @@ class BleMeshManager(context: Context) {
      */
     fun startScanning(): Boolean {
         if (_isScanning.value) return true
-        if (!hasBleScan()) return false
+        if (!hasBleScan()) {
+            Log.w("BleMeshManager", "Cannot start scan: missing BLE scan permission")
+            return false
+        }
         val scanner: BluetoothLeScanner = try {
             bluetoothAdapter?.bluetoothLeScanner
         } catch (_: SecurityException) {
             null
-        } ?: return false
+        } ?: run {
+            Log.w("BleMeshManager", "BluetoothLeScanner is null (BT enabled=${isBluetoothEnabled()})")
+            return false
+        }
         return try {
             val settings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build()
-            val filter = ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(SERVICE_UUID))
-                .build()
-            scanner.startScan(listOf(filter), settings, scanCallback)
+            // Broad filter matches all packets so vendor chipset filters don't drop beacons;
+            // handleScanResult specifically discards non-iTantra manufacturer packets.
+            val anyFilter = ScanFilter.Builder().build()
+            scanner.startScan(listOf(anyFilter), settings, scanCallback)
             _isScanning.value = true
+            Log.i("BleMeshManager", "BLE scanner started")
             if (pruneJob?.isActive != true) startPruning()
             true
         } catch (t: Throwable) {
+            Log.e("BleMeshManager", "startScan threw exception", t)
             _isScanning.value = false
             false
         }
