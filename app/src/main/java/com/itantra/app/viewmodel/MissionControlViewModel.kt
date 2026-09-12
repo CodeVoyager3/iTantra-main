@@ -1236,6 +1236,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         modelDownloadManager.download(language)
     }
 
+    fun pauseModelDownload(languageTag: String) {
+        modelDownloadManager.pause(languageTag)
+    }
+
+    fun cancelModelDownload(languageTag: String) {
+        modelDownloadManager.cancel(languageTag)
+    }
+
     fun deleteModel(languageTag: String) {
         viewModelScope.launch {
             modelStorageManager.deleteModel(languageTag)
