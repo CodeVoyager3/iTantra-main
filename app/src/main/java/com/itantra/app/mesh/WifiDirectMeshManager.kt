@@ -1,0 +1,357 @@
+package com.itantra.app.mesh
+
+import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.net.MacAddress
+import android.net.wifi.p2p.WifiP2pConfig
+import android.net.wifi.p2p.WifiP2pDevice
+import android.net.wifi.p2p.WifiP2pInfo
+import android.net.wifi.p2p.WifiP2pManager
+import android.net.wifi.p2p.WifiP2pManager.ActionListener
+import android.os.Build
+import androidx.core.content.ContextCompat
+import com.itantra.app.model.PeerDevice
+import com.itantra.app.model.TransportProtocol
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.SocketException
+import kotlin.concurrent.thread
+
+/**
+ * Wi-Fi Direct P2P group management + UDP broadcast mesh for iTantra.
+ *
+ * BE HONEST ABOUT OEM BEHAVIOUR: Wi-Fi Direct group formation is notoriously
+ * inconsistent across manufacturers (group owner negotiation, auto-join
+ * dialogs, 5 GHz support, and the 192.168.49.x subnet all vary). Everything
+ * here is guarded and degrades to a no-op when the platform rejects an
+ * operation or no P2P hardware is present (e.g. the emulator).
+ */
+class WifiDirectMeshManager(context: Context) {
+
+    companion object {
+        /** UDP mesh port used across the app. */
+        const val UDP_PORT = 8889
+
+        /** Broadcast target for the ad-hoc LAN. */
+        const val UDP_BROADCAST_HOST = "255.255.255.255"
+    }
+
+    private val appContext = context.applicationContext
+
+    private val manager: WifiP2pManager? =
+        appContext.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
+
+    private var channel: WifiP2pManager.Channel? = try {
+        manager?.initialize(appContext, appContext.mainLooper, null)
+    } catch (_: Exception) {
+        null
+    }
+
+    private var receiverRegistered = false
+
+    private val _peers = MutableStateFlow<List<PeerDevice>>(emptyList())
+    val peers: StateFlow<List<PeerDevice>> = _peers.asStateFlow()
+
+    private val _localIpAddress = MutableStateFlow<String?>(null)
+    val localIpAddress: StateFlow<String?> = _localIpAddress.asStateFlow()
+
+    private val _isGroupOwner = MutableStateFlow(false)
+    val isGroupOwner: StateFlow<Boolean> = _isGroupOwner.asStateFlow()
+
+    private val _isP2pEnabled = MutableStateFlow(false)
+    val isP2pEnabled: StateFlow<Boolean> = _isP2pEnabled.asStateFlow()
+
+    /** Incoming datagrams from the mesh (voice frames, link requests, ...). */
+    private val _incomingDatagrams = MutableSharedFlow<ByteArray>(
+        extraBufferCapacity = 32,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
+    )
+    val incomingDatagrams: SharedFlow<ByteArray> = _incomingDatagrams.asSharedFlow()
+
+    private var socket: DatagramSocket? = null
+    private var udpThread: Thread? = null
+
+    // =========================================================================
+    // Permissions
+    // =========================================================================
+
+    private fun hasPermission(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(appContext, permission) == PackageManager.PERMISSION_GRANTED
+
+    /** Discovery of nearby P2P devices is permission-gated by OS version. */
+    private fun hasDiscoveryPermission(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            hasPermission(Manifest.permission.NEARBY_WIFI_DEVICES)
+        } else {
+            hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+    // =========================================================================
+    // P2P lifecycle
+    // =========================================================================
+
+    private val receiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            try {
+                when (intent?.action) {
+                    WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
+                        val state = intent.getIntExtra(
+                            WifiP2pManager.EXTRA_WIFI_STATE, WifiP2pManager.WIFI_P2P_STATE_DISABLED
+                        )
+                        _isP2pEnabled.value = state == WifiP2pManager.WIFI_P2P_STATE_ENABLED
+                    }
+                    WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> requestPeers()
+                    WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> onConnectionChanged(intent)
+                    WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
+                        // Device name/status changed — peers refresh covers it.
+                    }
+                }
+            } catch (_: Exception) {
+                // Never let a malformed system broadcast crash the app.
+            }
+        }
+    }
+
+    init {
+        registerReceiverSafe()
+    }
+
+    private fun registerReceiverSafe() {
+        if (receiverRegistered || manager == null) return
+        receiverRegistered = try {
+            val filter = IntentFilter().apply {
+                addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
+                addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
+                addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
+                addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
+            }
+            ContextCompat.registerReceiver(
+                appContext, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun onConnectionChanged(intent: Intent) {
+        val info: WifiP2pInfo? = intent.getParcelableExtraCompat(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
+        info?.let {
+            _isGroupOwner.value = it.isGroupOwner
+            if (it.groupFormed) _localIpAddress.value = resolveLocalIp()
+        }
+        if (info?.groupFormed == false) {
+            _isGroupOwner.value = false
+            _localIpAddress.value = null
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.getParcelableExtraCompat(name: String): WifiP2pInfo? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(name, WifiP2pInfo::class.java)
+        } else {
+            getParcelableExtra(name)
+        }
+
+    /** Best-effort local IPv4 lookup for the P2P interface (p2p0/wlan0). */
+    private fun resolveLocalIp(): String? = try {
+        NetworkInterface.getNetworkInterfaces().toList()
+            .flatMap { iface -> iface.inetAddresses.toList() }
+            .filterIsInstance<Inet4Address>()
+            .firstOrNull { it.isSiteLocalAddress }
+            ?.hostAddress
+    } catch (_: Exception) {
+        null
+    }
+
+    private val actionLog: ActionListener = object : ActionListener {
+        override fun onSuccess() { /* logged implicitly by the state flows */ }
+        override fun onFailure(reason: Int) {
+            // OEM-variable; degrade silently. Callers observe the state flows.
+        }
+    }
+
+    /** Starts P2P peer discovery. */
+    fun startDiscovery() {
+        if (manager == null || !hasDiscoveryPermission()) return
+        try {
+            manager?.discoverPeers(channel, actionLog)
+        } catch (_: Exception) {
+        }
+    }
+
+    fun stopDiscovery() {
+        if (manager == null) return
+        try {
+            manager?.stopPeerDiscovery(channel, actionLog)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Re-populates [peers] from the platform's current peer list. */
+    fun requestPeers() {
+        if (manager == null || !hasDiscoveryPermission()) return
+        try {
+            manager?.requestPeers(channel) { peerList ->
+                val devices = peerList?.deviceList.orEmpty()
+                _peers.value = devices.map { it.toPeerDevice() }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Creates a P2P group, making this device the Group Owner. */
+    fun createGroup() {
+        if (manager == null) return
+        try {
+            manager?.createGroup(channel, actionLog)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Removes the current P2P group. */
+    fun removeGroup() {
+        if (manager == null) return
+        try {
+            manager?.removeGroup(channel, actionLog)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Connects to [peer] with a high group-owner intent. */
+    fun connectTo(peer: PeerDevice) {
+        if (manager == null || !hasDiscoveryPermission()) return
+        try {
+            // API 33+ hides the plain constructor and the Builder only takes
+            // MacAddress; groupOwnerIntent stays a public field either way.
+            val config = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                WifiP2pConfig.Builder()
+                    .setDeviceAddress(MacAddress.fromString(peer.address))
+                    .build()
+                    .apply { groupOwnerIntent = 15 }
+            } else {
+                @Suppress("DEPRECATION")
+                WifiP2pConfig().apply {
+                    deviceAddress = peer.address
+                    groupOwnerIntent = 15
+                }
+            }
+            manager?.connect(channel, config, actionLog)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun WifiP2pDevice.toPeerDevice(): PeerDevice = PeerDevice(
+        id = deviceAddress,
+        name = deviceName.ifEmpty { "P2P-$deviceAddress" },
+        address = deviceAddress,
+        protocol = TransportProtocol.WIFI_DIRECT,
+        signalStrengthDbm = -55, // P2P API does not expose RSSI
+        isConnected = status == WifiP2pDevice.CONNECTED,
+        isP2pHost = isGroupOwner,
+        port = UDP_PORT
+    )
+
+    // =========================================================================
+    // UDP mesh (broadcast + receive)
+    // =========================================================================
+
+    /**
+     * Opens the shared UDP broadcast socket on port 8889.
+     *
+     * @return true when the socket is bound and the receiver loop is running.
+     */
+    @Synchronized
+    fun startUdpBroadcast(): Boolean {
+        if (socket != null) return true
+        return try {
+            val s = DatagramSocket(null)
+            s.reuseAddress = true
+            s.broadcast = true
+            s.bind(InetSocketAddress(UDP_PORT))
+            socket = s
+            udpThread = thread(name = "itantra-udp-rx", isDaemon = true) { udpReceiveLoop(s) }
+            true
+        } catch (_: Exception) {
+            // Port busy / no network — the mesh just stays silent.
+            false
+        }
+    }
+
+    private fun udpReceiveLoop(s: DatagramSocket) {
+        val buffer = ByteArray(65507)
+        while (!Thread.currentThread().isInterrupted) {
+            try {
+                val packet = DatagramPacket(buffer, buffer.size)
+                s.receive(packet)
+                if (packet.length > 0) {
+                    _incomingDatagrams.tryEmit(packet.data.copyOf(packet.length))
+                }
+            } catch (_: SocketException) {
+                break // socket closed — exit the loop
+            } catch (_: Exception) {
+                // Keep listening; a single malformed packet must not kill the loop.
+            }
+        }
+    }
+
+    /** Broadcasts [bytes] to the whole ad-hoc LAN (255.255.255.255:8889). */
+    fun broadcastDatagram(bytes: ByteArray): Boolean {
+        val s = socket ?: return false
+        return try {
+            s.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(UDP_BROADCAST_HOST), UDP_PORT))
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Sends [bytes] to a single host:port (direct-IP links). */
+    fun sendDatagram(bytes: ByteArray, host: String, port: Int = UDP_PORT): Boolean {
+        val s = socket ?: return false
+        return try {
+            s.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(host), port))
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    @Synchronized
+    fun stopUdp() {
+        val s = socket
+        socket = null
+        runCatching { s?.close() }
+        udpThread?.interrupt()
+        udpThread = null
+    }
+
+    /** Stops everything: UDP, discovery, and the P2P broadcast receiver. */
+    fun shutdown() {
+        stopUdp()
+        stopDiscovery()
+        if (receiverRegistered) {
+            runCatching { appContext.unregisterReceiver(receiver) }
+            receiverRegistered = false
+        }
+        _peers.value = emptyList()
+        _localIpAddress.value = null
+        _isGroupOwner.value = false
+        _isP2pEnabled.value = false
+    }
+}

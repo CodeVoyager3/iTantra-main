@@ -181,7 +181,8 @@ data class DistressVictim(
     val relativeBearingDegrees: Float = 0f, // 0° = North, 90° = East, 180° = South, 270° = West
     val hazardType: String = "Structural Collapse",
     val latitude: Double = 0.0,
-    val longitude: Double = 0.0
+    val longitude: Double = 0.0,
+    val nodeId: Long = 0L // mesh node id of the beacon this victim was derived from
 )
 
 data class RescuerNode(

@@ -58,6 +58,9 @@ dependencies {
     // --- DataStore (settings) ---
     implementation(libs.androidx.datastore.preferences)
 
+    // --- ONNX Runtime (offline neural inference) ---
+    implementation(libs.onnxruntime.android)
+
     // --- Coroutines ---
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.core)

@@ -79,6 +79,15 @@ class MainActivity : ComponentActivity() {
             val uiState by viewModel.uiState.collectAsState()
             val isSystemDark = isSystemInDarkTheme()
 
+            // Dynamic Keep Screen Awake handling based on tactical settings
+            LaunchedEffect(uiState.keepScreenAwake) {
+                if (uiState.keepScreenAwake) {
+                    window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+
             // Theme evaluation (Light / Dark / System)
             val isDark = when (uiState.themeMode) {
                 "light" -> false
@@ -106,6 +115,7 @@ fun MainAppContent(viewModel: MissionControlViewModel) {
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            list.add(Manifest.permission.POST_NOTIFICATIONS)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             list.add(Manifest.permission.BLUETOOTH_CONNECT)

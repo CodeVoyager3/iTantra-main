@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,7 +35,6 @@ import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Radio
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Storage
@@ -69,8 +69,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.itantra.app.model.AiModelCategory
-import com.itantra.app.model.DownloadedAiModel
+import com.itantra.app.modelhub.LanguageModelPack
+import com.itantra.app.modelhub.ModelDownloadState
 import com.itantra.app.ui.theme.AccentBlue
 import com.itantra.app.ui.theme.AccentBlueContainer
 import com.itantra.app.ui.theme.BadgeMintContainer
@@ -102,7 +102,7 @@ fun SettingsScreen(
     val colors = MaterialTheme.minimalColors
     val uiState by viewModel.uiState.collectAsState()
     val callsign by viewModel.callsign.collectAsState()
-    val downloadedModels by viewModel.downloadedModels.collectAsState()
+    val modelPacks by viewModel.modelPacks.collectAsState()
     val txPower by viewModel.txPower.collectAsState()
     val beaconInterval by viewModel.beaconInterval.collectAsState()
     val meshHopLimit by viewModel.meshHopLimit.collectAsState()
@@ -112,12 +112,11 @@ fun SettingsScreen(
     val zeroLogPrivacy by viewModel.zeroLogPrivacy.collectAsState()
     val mapCacheSizeMb by viewModel.mapCacheSizeMb.collectAsState()
 
-    val totalModelStorageMb = remember(downloadedModels) {
-        downloadedModels.sumOf { it.sizeMb }
-    }
+    val installedPacks = modelPacks.filter { it.isInstalled }
+    val installedStorageMb = installedPacks.sumOf { it.sizeMb }
 
     // State for delete confirmation dialog
-    var modelToDelete by remember { mutableStateOf<DownloadedAiModel?>(null) }
+    var modelToDelete by remember { mutableStateOf<LanguageModelPack?>(null) }
     var showWipeConfirmDialog by remember { mutableStateOf(false) }
 
     val scrollState = rememberScrollState()
@@ -298,7 +297,7 @@ fun SettingsScreen(
         }
 
         // ==========================================
-        // 3. DOWNLOADED ON-DEVICE AI MODELS
+        // 3. ON-DEVICE AI MODEL PACKS (REAL OFFLINE HUB)
         // ==========================================
         Box(
             modifier = Modifier
@@ -309,63 +308,38 @@ fun SettingsScreen(
                 .padding(16.dp)
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                // Header with reload button
+                // Header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(colors.badgePurpleContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Psychology,
-                                contentDescription = null,
-                                tint = colors.badgePurpleText,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = "ON-DEVICE AI MODELS",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = colors.textPrimary
-                            )
-                            Text(
-                                text = "100% Offline • Zero Internet Required",
-                                fontSize = 11.sp,
-                                color = colors.badgeMintText
-                            )
-                        }
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(colors.badgePurpleContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Psychology,
+                            contentDescription = null,
+                            tint = colors.badgePurpleText,
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
-
-                    if (downloadedModels.size < 7) {
-                        TextButton(
-                            onClick = { viewModel.restoreDefaultModels() }
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = null,
-                                    tint = colors.accent,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "Restore All",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = colors.accent
-                                )
-                            }
-                        }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "ON-DEVICE AI MODELS",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.textPrimary
+                        )
+                        Text(
+                            text = "100% Offline • Download packs on demand",
+                            fontSize = 11.sp,
+                            color = colors.badgeMintText
+                        )
                     }
                 }
 
@@ -399,23 +373,23 @@ fun SettingsScreen(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "$totalModelStorageMb MB",
+                                    text = "${formatSizeMb(installedStorageMb)} MB",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = colors.textPrimary
                                 )
                             }
                             Text(
-                                text = "${downloadedModels.size} Engines Installed",
+                                text = "${installedPacks.size} Engines Installed",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = colors.badgeMintText
                             )
                         }
 
-                        // Progress representation (relative to simulated 1024 MB quota)
+                        // Progress relative to a 2048 MB tactical storage quota
                         LinearProgressIndicator(
-                            progress = { (totalModelStorageMb / 1024f).coerceIn(0f, 1f) },
+                            progress = { (installedStorageMb / MODEL_STORAGE_QUOTA_MB).toFloat().coerceIn(0f, 1f) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(6.dp)
@@ -428,40 +402,15 @@ fun SettingsScreen(
 
                 HorizontalDivider(color = colors.outline, thickness = 1.dp)
 
-                // Models List
-                if (downloadedModels.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 16.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = "No on-device models installed",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = colors.textSecondary
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Button(
-                                onClick = { viewModel.restoreDefaultModels() },
-                                colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
-                                Text("Re-download Standard Pack", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        downloadedModels.forEach { model ->
-                            ModelItemCard(
-                                model = model,
-                                colors = colors,
-                                onDeleteClick = { modelToDelete = model }
-                            )
-                        }
+                // Model pack list
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    modelPacks.forEach { pack ->
+                        LanguagePackRow(
+                            pack = pack,
+                            colors = colors,
+                            onDownload = { viewModel.downloadModel(pack.languageTag) },
+                            onDeleteClick = { modelToDelete = pack }
+                        )
                     }
                 }
             }
@@ -965,7 +914,7 @@ fun SettingsScreen(
             },
             title = {
                 Text(
-                    text = "Delete AI Model?",
+                    text = "Delete Language Pack?",
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
                     color = colors.textPrimary
@@ -974,12 +923,12 @@ fun SettingsScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Are you sure you want to remove \"${target.name}\" from offline storage?",
+                        text = "Are you sure you want to remove \"${target.name}\" (${target.languageTag}) from offline storage?",
                         fontSize = 13.sp,
                         color = colors.textPrimary
                     )
                     Text(
-                        text = "This will immediately free up ${target.sizeMb} MB. Offline ${target.category.label.lowercase()} for ${target.language} will be disabled until re-downloaded.",
+                        text = "This will immediately free up ${formatSizeMb(target.sizeMb)} MB. Offline speech for ${target.name} will be disabled until re-downloaded.",
                         fontSize = 12.sp,
                         color = colors.textSecondary
                     )
@@ -988,7 +937,7 @@ fun SettingsScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.deleteModel(target.id)
+                        viewModel.deleteModel(target.languageTag)
                         modelToDelete = null
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = colors.error),
@@ -1044,8 +993,7 @@ fun SettingsScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.clearLogs()
-                        viewModel.clearMapCache()
+                        viewModel.emergencyWipe()
                         showWipeConfirmDialog = false
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = colors.error),
@@ -1116,25 +1064,27 @@ private fun ThemeOptionButton(
     }
 }
 
+/** Tactical on-device model storage quota (MB) used for the storage bar. */
+private const val MODEL_STORAGE_QUOTA_MB = 2048.0
+
+private fun formatSizeMb(sizeMb: Double): String =
+    String.format(java.util.Locale.US, "%.1f", sizeMb)
+
 /**
- * Single Model Card in the Downloaded AI Models list
+ * Single language pack row in the ON-DEVICE AI MODELS list. The trailing
+ * action adapts to the pack's live download state.
  */
 @Composable
-private fun ModelItemCard(
-    model: DownloadedAiModel,
+private fun LanguagePackRow(
+    pack: LanguageModelPack,
     colors: com.itantra.app.ui.theme.MinimalColors,
+    onDownload: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
-    val categoryBadgeBg = when (model.category) {
-        AiModelCategory.STT -> colors.badgeBlueContainer
-        AiModelCategory.TTS -> colors.badgeMintContainer
-        AiModelCategory.TRANSLATION -> colors.badgePurpleContainer
-    }
-    val categoryBadgeText = when (model.category) {
-        AiModelCategory.STT -> colors.badgeBlueText
-        AiModelCategory.TTS -> colors.badgeMintText
-        AiModelCategory.TRANSLATION -> colors.badgePurpleText
-    }
+    val state = pack.downloadState
+    val busy = state is ModelDownloadState.Downloading ||
+        state is ModelDownloadState.Verifying ||
+        state is ModelDownloadState.Extracting
 
     Box(
         modifier = Modifier
@@ -1144,66 +1094,129 @@ private fun ModelItemCard(
             .border(0.5.dp, colors.outline, RoundedCornerShape(14.dp))
             .padding(12.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // Category Badge
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(categoryBadgeBg)
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        // Script badge
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(colors.badgeBlueContainer)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = pack.script,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.badgeBlueText
+                            )
+                        }
+
+                        // Language tag
                         Text(
-                            text = model.category.label,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = categoryBadgeText
+                            text = pack.languageTag.uppercase(),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.textSecondary
                         )
                     }
 
-                    // Language tag
+                    Spacer(modifier = Modifier.height(4.dp))
+
                     Text(
-                        text = model.language,
+                        text = pack.name,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary
+                    )
+
+                    Text(
+                        text = "STT + TTS engine • ${formatSizeMb(pack.sizeMb)} MB",
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
                         color = colors.textSecondary
                     )
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
+                when {
+                    pack.isInstalled -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Installed",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.badgeMintText
+                        )
+                        IconButton(
+                            onClick = onDeleteClick,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Delete,
+                                contentDescription = "Delete ${pack.name}",
+                                tint = colors.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
 
-                Text(
-                    text = model.name,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = colors.textPrimary
-                )
+                    busy -> Text(
+                        text = when (state) {
+                            is ModelDownloadState.Downloading -> "${(state.progress * 100).toInt()}%"
+                            is ModelDownloadState.Verifying -> "Verifying"
+                            else -> "Extracting"
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.accent
+                    )
 
-                Text(
-                    text = "${model.description} • ${model.sizeMb} MB",
-                    fontSize = 11.sp,
-                    color = colors.textSecondary
-                )
+                    state is ModelDownloadState.Error -> Button(
+                        onClick = onDownload,
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.error),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Text("Retry", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+
+                    else -> Button(
+                        onClick = onDownload,
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.accent),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Text("Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
 
-            // Trash action button
-            IconButton(
-                onClick = onDeleteClick,
-                modifier = Modifier.size(36.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Delete,
-                    contentDescription = "Delete ${model.name}",
-                    tint = colors.error,
-                    modifier = Modifier.size(18.dp)
+            if (state is ModelDownloadState.Downloading) {
+                LinearProgressIndicator(
+                    progress = { state.progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(CircleShape),
+                    color = colors.accent,
+                    trackColor = colors.outline
+                )
+                Text(
+                    text = "Downloading • ${formatSizeMb(state.progressBytes / (1024.0 * 1024.0))} / ${formatSizeMb(state.totalBytes / (1024.0 * 1024.0))} MB",
+                    fontSize = 10.sp,
+                    color = colors.textSecondary
+                )
+            } else if (state is ModelDownloadState.Error) {
+                Text(
+                    text = state.message,
+                    fontSize = 10.sp,
+                    color = colors.error
                 )
             }
         }

@@ -29,6 +29,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Android 13+: the beacon foreground-service notification needs this
+         to be visible. Runtime prompt is not wired in MainActivity (left
+         untouched); the FGS itself still runs without it. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- ── Internet (future / optional cloud fallback) ── -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -61,6 +65,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name="com.itantra.app.service.TacticalMeshService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
     </application>
 
