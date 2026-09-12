@@ -6,6 +6,9 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
+import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,14 +21,9 @@ import kotlin.math.sqrt
  * Real microphone capture with a lightweight energy-based VAD.
  *
  *  - 16 kHz, mono, PCM 16-bit, 20 ms frames (640 bytes)
- *  - optional 80 Hz first-order-difference high-pass to remove wind rumble
- *  - adaptive noise floor; speech triggers at ~14 dB above the floor for
- *    3 consecutive frames and releases after >500 ms of silence
- *  - callbacks fire on the capture thread; all engine state is also exposed
- *    as StateFlows for reactive UI wiring
- *
- * The engine is permission-guarded: without RECORD_AUDIO, [start] is a safe
- * no-op that keeps the UI functional.
+ *  - Hardware AEC and NoiseSuppressor enabled on supported devices
+ *  - Adaptive noise floor clamped against loud fans and motors
+ *  - 5.0 dB trigger threshold for immediate near-mic voice detection
  */
 class AudioCaptureEngine(context: Context) {
 
@@ -35,20 +33,26 @@ class AudioCaptureEngine(context: Context) {
         const val FRAME_BYTES = SAMPLE_RATE_HZ * 2 * FRAME_MS / 1000 // 640
         const val FRAME_SHORTS = FRAME_BYTES / 2 // 320
 
-        /** Margin (dB) above the noise floor required to trigger speech. */
-        private const val SPEECH_TRIGGER_DB = 10.0
+        /** Margin (dB) above the noise floor required to trigger speech (4.5 dB for near-mic speech). */
+        private const val SPEECH_TRIGGER_DB = 4.5
 
-        /** Number of consecutive loud frames before speech is declared. */
+        /** Number of consecutive loud frames before speech is declared (~40ms). */
         private const val SPEECH_TRIGGER_FRAMES = 2
 
-        /** Margin (dB) below which speech is considered ended. */
-        private const val SPEECH_RELEASE_DB = 4.0
+        /** Margin (dB) below which speech is considered ended (3.5 dB ensures fan noise doesn't lock VAD). */
+        private const val SPEECH_RELEASE_DB = 3.5
 
-        /** Silence duration (ms) before an end-of-turn event fires. */
-        private const val END_OF_TURN_MS = 450L
+        /** Silence duration (ms) before an end-of-turn event fires (800ms for natural speech pauses). */
+        private const val END_OF_TURN_MS = 800L
+
+        /** Number of 20ms frames (~200ms) kept in ring buffer to preserve leading phonemes. */
+        private const val PRE_SPEECH_FRAMES = 10
 
         /** Floor for the adaptive noise estimate, in raw RMS units. */
-        private const val MIN_NOISE_FLOOR = 10.0
+        private const val MIN_NOISE_FLOOR = 20.0
+
+        /** Maximum ceiling for the adaptive noise floor so fan noise cannot drown out speech. */
+        private const val MAX_NOISE_FLOOR = 2000.0
     }
 
     private val appContext = context.applicationContext
@@ -111,7 +115,7 @@ class AudioCaptureEngine(context: Context) {
 
         val recorder = try {
             AudioRecord.Builder()
-                .setAudioSource(MediaRecorder.AudioSource.MIC)
+                .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setSampleRate(SAMPLE_RATE_HZ)
@@ -122,7 +126,21 @@ class AudioCaptureEngine(context: Context) {
                 .setBufferSizeInBytes(bufferBytes)
                 .build()
         } catch (_: Exception) {
-            return false // no mic / unsupported config — degrade silently
+            try {
+                AudioRecord.Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.MIC)
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setSampleRate(SAMPLE_RATE_HZ)
+                            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(bufferBytes)
+                    .build()
+            } catch (_: Exception) {
+                return false // no mic / unsupported config — degrade silently
+            }
         }
 
         if (recorder.state != AudioRecord.STATE_INITIALIZED) {
@@ -131,6 +149,21 @@ class AudioCaptureEngine(context: Context) {
         }
 
         record = recorder
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                NoiseSuppressor.create(recorder.audioSessionId)?.apply {
+                    enabled = true
+                }
+            }
+            if (AcousticEchoCanceler.isAvailable()) {
+                AcousticEchoCanceler.create(recorder.audioSessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("AudioCaptureEngine", "Hardware FX setup failed", e)
+        }
+
         try {
             recorder.startRecording()
         } catch (_: Exception) {
@@ -172,11 +205,10 @@ class AudioCaptureEngine(context: Context) {
     private fun captureLoop() {
         val recorder = record ?: return
         val frameShorts = ShortArray(FRAME_SHORTS)
+        val preSpeechBuffer = ArrayDeque<ByteArray>(PRE_SPEECH_FRAMES)
         var noiseFloor = -1.0 // initialized from the first frame
         var consecutiveSpeechFrames = 0
         var silentFrames = 0
-        var prevSample = 0
-        var gateLevel = 1.0
 
         while (running) {
             val read = try {
@@ -187,26 +219,19 @@ class AudioCaptureEngine(context: Context) {
             if (read <= 0) break // recorder stopped/released
             if (read != frameShorts.size) continue // ignore partial trailing frames
 
-            val gate = noiseSuppressionEnabled
-            var rms: Double
-            if (gate) {
-                // 80 Hz first-order high-pass (x[n] - x[n-1]): kills wind rumble.
-                var acc = 0L
-                var s = 0
-                for (x in frameShorts) {
-                    val y = x.toInt() - prevSample
-                    prevSample = x.toInt()
-                    acc += y.toLong() * y.toLong()
-                    s++
-                }
-                rms = sqrt(acc.toDouble() / s)
-            } else {
-                var acc = 0L
-                for (x in frameShorts) acc += x.toLong() * x.toLong()
-                rms = sqrt(acc.toDouble() / frameShorts.size)
+            val pcmFrame = shortsToPcmLittleEndian(frameShorts)
+
+            // True RMS of frame (avoids differentiator filters that boost fan noise)
+            var sumSq = 0.0
+            for (x in frameShorts) {
+                sumSq += x.toDouble() * x.toDouble()
             }
+            val rms = sqrt(sumSq / frameShorts.size)
 
             if (noiseFloor < 0) noiseFloor = rms.coerceAtLeast(MIN_NOISE_FLOOR)
+            // Clamp noise floor so loud fans cannot raise threshold to an unreachable level
+            noiseFloor = noiseFloor.coerceIn(MIN_NOISE_FLOOR, MAX_NOISE_FLOOR)
+
             val marginDb = 20.0 * log10((rms / noiseFloor).coerceAtLeast(1e-6))
 
             if (speaking) {
@@ -218,6 +243,7 @@ class AudioCaptureEngine(context: Context) {
                 if (silentFrames * FRAME_MS >= END_OF_TURN_MS) {
                     speaking = false
                     _speechActive.value = false
+                    preSpeechBuffer.clear()
                     onSpeechStateChanged?.invoke(false)
                     onEndOfTurn?.invoke()
                     silentFrames = 0
@@ -233,10 +259,24 @@ class AudioCaptureEngine(context: Context) {
                     _speechActive.value = true
                     onSpeechStateChanged?.invoke(true)
                     silentFrames = 0
+                    // Flush buffered pre-speech frames into turn buffer so initial consonants are intact
+                    if (!muted) {
+                        while (preSpeechBuffer.isNotEmpty()) {
+                            onFrame?.invoke(preSpeechBuffer.removeFirst())
+                        }
+                    } else {
+                        preSpeechBuffer.clear()
+                    }
+                } else {
+                    // Buffer pre-speech frames while quiet
+                    if (preSpeechBuffer.size >= PRE_SPEECH_FRAMES) {
+                        preSpeechBuffer.removeFirst()
+                    }
+                    preSpeechBuffer.addLast(pcmFrame)
                 }
-                // Adapt the noise floor only while the environment is quiet.
-                if (rms <= noiseFloor * 1.5) {
-                    noiseFloor = noiseFloor * 0.95 + rms * 0.05
+                // Adapt the noise floor slowly during silence
+                if (rms <= noiseFloor * 1.4) {
+                    noiseFloor = (noiseFloor * 0.96 + rms * 0.04).coerceIn(MIN_NOISE_FLOOR, MAX_NOISE_FLOOR)
                 }
             }
 
@@ -251,12 +291,8 @@ class AudioCaptureEngine(context: Context) {
                 (SPEECH_TRIGGER_DB - SPEECH_RELEASE_DB)).toFloat().coerceIn(0f, 1f)
             onSpeechProbability?.invoke(prob01)
 
-            // One-pole noise gate: opens on speech, decays closed in noise.
-            val gateTarget = if (gate && !speaking && rms <= noiseFloor * 2.0) 0.0 else 1.0
-            gateLevel = gateLevel * 0.85 + gateTarget * 0.15
-
-            if (!muted && (speaking || gateLevel > 0.05)) {
-                onFrame?.invoke(shortsToPcmLittleEndian(frameShorts))
+            if (!muted && speaking) {
+                onFrame?.invoke(pcmFrame)
             }
         }
     }

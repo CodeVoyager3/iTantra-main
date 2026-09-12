@@ -1,7 +1,12 @@
 package com.itantra.app.ui.screens
 
+import android.app.Activity
+import android.content.Intent
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -18,6 +23,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -177,6 +184,24 @@ fun RescueScreen(
     val uiState by viewModel.uiState.collectAsState()
     val selectedLanguage = uiState.selectedLanguage
     val modelPacks by viewModel.modelPacks.collectAsState()
+    val messageLogs by viewModel.messageLogs.collectAsState()
+    val currentTranscript = uiState.currentTranscript
+    val isVadSpeaking by viewModel.isVadSpeaking.collectAsState()
+    val isPttActive by viewModel.isPttActive.collectAsState()
+    val isModelInstalled = modelPacks.firstOrNull { it.iso == selectedLanguage.code || it.languageTag.startsWith(selectedLanguage.code) }?.isInstalled == true
+
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spokenText = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!spokenText.isNullOrBlank()) {
+                viewModel.sendBroadcastTextMessage(spokenText)
+            }
+        }
+    }
 
     var showLanguageSheet by remember { mutableStateOf(false) }
     var languageSearchQuery by remember { mutableStateOf("") }
@@ -1107,6 +1132,401 @@ fun RescueScreen(
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = SosRedDark
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // =====================================================
+            // LIVE TRANSCRIPTION CARD (Rescuer side)
+            // =====================================================
+            if (connectedVictim != null || isBroadcastingToAll || isRescueActive || messageLogs.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .shadow(elevation = 2.dp, shape = RoundedCornerShape(22.dp), spotColor = Color(0x0A000000))
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(colors.surface)
+                        .border(1.dp, colors.outline, RoundedCornerShape(22.dp))
+                        .padding(16.dp)
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "LIVE TRANSCRIPTION",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.8.sp,
+                                    color = colors.textSecondary
+                                )
+                                // Model status indicator badge
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(
+                                            if (isModelInstalled) BadgeMintContainer
+                                            else Color(0xFFFEF3C7)
+                                        )
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = if (isModelInstalled) "✓ AI STT ACTIVE" else "⚠️ PACK REQUIRED",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isModelInstalled) BadgeMintText else Color(0xFF92400E)
+                                    )
+                                }
+                            }
+
+                            if (messageLogs.isNotEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(BadgeMintContainer)
+                                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                                ) {
+                                    Text(
+                                        text = "${messageLogs.size} MSG",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = BadgeMintText
+                                    )
+                                }
+                            }
+                        }
+
+                        // Warning banner if neural model pack is missing
+                        if (modelWarning != null) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (colors.isDark) Color(0xFF451A03) else Color(0xFFFEF3C7))
+                                    .border(1.dp, Color(0xFFF59E0B), RoundedCornerShape(10.dp))
+                                    .padding(10.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.WarningAmber,
+                                        contentDescription = null,
+                                        tint = Color(0xFFB45309),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = modelWarning ?: "",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF92400E),
+                                        lineHeight = 15.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        // Voice Controls Row: Hold to Talk (PTT) + Instant Voice Dictate
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // 1. Hold to Talk (PTT) Button
+                            Box(
+                                modifier = Modifier
+                                    .weight(1.2f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isPttActive || isVadSpeaking) RescueAmber
+                                        else if (colors.isDark) Color(0xFF1E293B)
+                                        else Color(0xFFF1F5F9)
+                                    )
+                                    .border(
+                                        1.dp,
+                                        if (isPttActive || isVadSpeaking) Color(0xFFD97706)
+                                        else colors.outline,
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .pointerInput(Unit) {
+                                        detectTapGestures(
+                                            onPress = {
+                                                viewModel.startPtt()
+                                                tryAwaitRelease()
+                                                viewModel.stopPtt()
+                                            }
+                                        )
+                                    }
+                                    .padding(vertical = 10.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Mic,
+                                        contentDescription = "Hold to talk",
+                                        tint = if (isPttActive || isVadSpeaking) Color.White else RescueAmberText,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = if (isPttActive || isVadSpeaking) "RECORDING..." else "HOLD TO TALK",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isPttActive || isVadSpeaking) Color.White else colors.textPrimary
+                                    )
+                                }
+                            }
+
+                            // 2. Voice Dictation Button (Android SpeechRecognizer in selected language)
+                            Box(
+                                modifier = Modifier
+                                    .weight(0.9f)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(AccentBlue.copy(alpha = 0.12f))
+                                    .border(1.dp, AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, selectedLanguage.languageTag)
+                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, selectedLanguage.languageTag)
+                                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in ${selectedLanguage.nativeName}...")
+                                        }
+                                        try {
+                                            speechLauncher.launch(intent)
+                                        } catch (_: Exception) {}
+                                    }
+                                    .padding(vertical = 10.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = "🗣️ DICTATE",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = AccentBlue
+                                    )
+                                }
+                            }
+                        }
+
+                        // Active speaking recording pulse banner
+                        if (isVadSpeaking || isPttActive) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(RescueAmber.copy(alpha = 0.15f))
+                                    .border(0.5.dp, RescueAmber.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(RescueAmber)
+                                    )
+                                    Text(
+                                        text = "RECORDING SPEECH... (Release button or pause to send)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = RescueAmberText
+                                    )
+                                }
+                            }
+                        }
+
+                        // Live transcript / processing status banner
+                        if (currentTranscript.isNotBlank()) {
+                            val isListening = currentTranscript.startsWith("🎙️")
+                            val isTranscribing = currentTranscript.startsWith("🧠")
+                            val isWarning = currentTranscript.startsWith("⚠️")
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        when {
+                                            isListening -> RescueAmber.copy(alpha = 0.15f)
+                                            isTranscribing -> BadgeMintContainer.copy(alpha = 0.6f)
+                                            isWarning -> if (colors.isDark) Color(0xFF451A03) else Color(0xFFFEF3C7)
+                                            colors.isDark -> Color(0xFF1E3A5F).copy(alpha = 0.6f)
+                                            else -> Color(0xFFEFF6FF)
+                                        }
+                                    )
+                                    .border(
+                                        1.dp,
+                                        when {
+                                            isListening -> RescueAmber.copy(alpha = 0.6f)
+                                            isTranscribing -> Color(0xFF059669).copy(alpha = 0.5f)
+                                            isWarning -> Color(0xFFF59E0B)
+                                            else -> AccentBlue.copy(alpha = 0.4f)
+                                        },
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .padding(12.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = if (isListening || isTranscribing || isWarning) currentTranscript
+                                               else "\"$currentTranscript\"",
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isListening || isTranscribing) FontWeight.Bold else FontWeight.Medium,
+                                        color = when {
+                                            isListening -> RescueAmberText
+                                            isTranscribing -> Color(0xFF065F46)
+                                            isWarning -> if (colors.isDark) Color(0xFFFDE68A) else Color(0xFF92400E)
+                                            colors.isDark -> Color(0xFFBFDBFE)
+                                            else -> Color(0xFF1E40AF)
+                                        },
+                                        lineHeight = 18.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (!isListening && !isTranscribing && !isWarning) {
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(BadgeMintContainer)
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = "✓ SENT",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = BadgeMintText
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (messageLogs.isEmpty()) {
+                            // Standby waiting state
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(colors.cardSecondaryBg)
+                                    .padding(12.dp)
+                            ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(
+                                        text = "🎙️ Rescue Intercom Channel Ready",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = colors.textPrimary
+                                    )
+                                    Text(
+                                        text = if (isModelInstalled)
+                                            "Speak clearly into mic or hold button. Neural AI STT will transcribe and broadcast text to victims over mesh for instant TTS playback."
+                                        else
+                                            "Neural STT pack is not downloaded. Use HOLD TO TALK or DICTATE, or tap Quick Rescuer Phrases below.",
+                                        fontSize = 11.sp,
+                                        color = colors.textSecondary,
+                                        lineHeight = 15.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        // Localized Quick Rescuer Transmit Chips
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "QUICK RESCUER PHRASES (${selectedLanguage.nativeName.uppercase()})",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.5.sp,
+                                color = colors.textSecondary
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                selectedLanguage.quickRescuePhrases.forEach { phrase ->
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (colors.isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9))
+                                            .border(0.5.dp, colors.outline, RoundedCornerShape(8.dp))
+                                            .clickable { viewModel.sendBroadcastTextMessage(phrase) }
+                                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                                    ) {
+                                        Text(
+                                            text = phrase,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = colors.textPrimary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Message log (last 5 messages)
+                        messageLogs.take(5).forEach { msg ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(colors.cardSecondaryBg)
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                // Sent/Received indicator
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(
+                                            if (msg.isLocal) AccentBlue.copy(alpha = 0.15f)
+                                            else RescueAmber.copy(alpha = 0.15f)
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = if (msg.isLocal) "↑" else "↓",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (msg.isLocal) AccentBlue else RescueAmber
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = msg.text,
+                                        fontSize = 12.sp,
+                                        color = colors.textPrimary,
+                                        lineHeight = 16.sp,
+                                        maxLines = 3
+                                    )
+                                    Text(
+                                        text = if (msg.isLocal) "You • ${msg.senderCallsign}" else "Victim • ${msg.senderCallsign}",
+                                        fontSize = 10.sp,
+                                        color = colors.textSecondary
                                     )
                                 }
                             }

@@ -1,21 +1,27 @@
 package com.itantra.app.ai
 
+import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtException
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.nio.FloatBuffer
+import java.nio.IntBuffer
 import java.nio.LongBuffer
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.log10
+import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -79,17 +85,16 @@ class OnnxInferenceManager(context: Context) {
         }
     }
 
-    private fun buildSessionOptions(): OrtSession.SessionOptions? = try {
+    private fun buildSessionOptions(useNnapi: Boolean = false): OrtSession.SessionOptions? = try {
         OrtSession.SessionOptions().apply {
             setIntraOpNumThreads(minOf(4, Runtime.getRuntime().availableProcessors()))
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            // NNAPI hardware acceleration where the device has a driver.
-            // addNnapi() exists in onnxruntime-android 1.22.0; some devices
-            // reject it at runtime, so a failure just leaves CPU execution.
-            try {
-                addNnapi()
-            } catch (_: OrtException) {
-                // continue on CPU — not fatal
+            if (useNnapi) {
+                try {
+                    addNnapi()
+                } catch (_: Exception) {
+                    // continue on CPU — not fatal
+                }
             }
         }
     } catch (_: Throwable) {
@@ -102,17 +107,22 @@ class OnnxInferenceManager(context: Context) {
         val baseDir = File(appContext.filesDir, "models")
         if (!baseDir.exists()) return null
         val matchingDir = baseDir.listFiles()?.firstOrNull {
-            it.isDirectory && (it.name.startsWith("$languageTag-", ignoreCase = true) || it.name.equals(languageTag, ignoreCase = true))
+            it.isDirectory && (
+                it.name.equals(languageTag, ignoreCase = true) ||
+                it.name.startsWith("$languageTag-", ignoreCase = true) ||
+                languageTag.startsWith("${it.name}-", ignoreCase = true)
+            )
         }
-        val candidate = if (matchingDir != null) File(matchingDir, subDirName) else null
-        return if (candidate?.exists() == true) candidate else direct
+        if (matchingDir != null) {
+            val candidate = File(matchingDir, subDirName)
+            if (candidate.exists()) return candidate
+            if (matchingDir.listFiles()?.any { it.extension.equals("onnx", ignoreCase = true) } == true) {
+                return matchingDir
+            }
+        }
+        return if (direct.exists()) direct else matchingDir
     }
 
-    /**
-     * Loads the STT model + vocab for [languageTag].
-     *
-     * @return true when both the session and the vocab are ready.
-     */
     /**
      * Loads the STT model + vocab for [languageTag].
      *
@@ -124,18 +134,38 @@ class OnnxInferenceManager(context: Context) {
             return true
         }
         closeSttLocked()
-        val env = ensureEnvironment() ?: return false
-        val sttDir = resolveModelSubdir(languageTag, "stt") ?: return false
-        val modelFile = resolveModelFile(sttDir, preferred = STT_MODEL_FILE) ?: return false
+        val env = ensureEnvironment() ?: run {
+            Log.e("OnnxInferenceManager", "loadStt: OrtEnvironment could not be created")
+            return false
+        }
+        val sttDir = resolveModelSubdir(languageTag, "stt") ?: run {
+            Log.w("OnnxInferenceManager", "loadStt: stt subdir not found for $languageTag")
+            return false
+        }
+        val modelFile = resolveModelFile(sttDir, preferred = STT_MODEL_FILE) ?: run {
+            Log.w("OnnxInferenceManager", "loadStt: model file not found in $sttDir")
+            return false
+        }
         return try {
-            val session = env.createSession(modelFile.absolutePath, buildSessionOptions())
+            val opts = buildSessionOptions(useNnapi = false)
+            val session = env.createSession(modelFile.absolutePath, opts)
             val vocabFile = File(sttDir, STT_VOCAB_FILE)
             sttSession = session
             sttVocab = if (vocabFile.exists()) parseVocab(vocabFile.readText()) else emptyList()
             loadedSttTag = languageTag
             _isSttLoaded.value = true
+            Log.i("OnnxInferenceManager", "loadStt: Successfully loaded STT for $languageTag (vocab size: ${sttVocab.size})")
+            session.inputInfo.forEach { (name, info) ->
+                val tInfo = info.info as? TensorInfo
+                Log.i("OnnxInferenceManager", "loadStt input '$name': type=${tInfo?.type}, shape=${tInfo?.shape?.contentToString()}")
+            }
+            session.outputInfo.forEach { (name, info) ->
+                val tInfo = info.info as? TensorInfo
+                Log.i("OnnxInferenceManager", "loadStt output '$name': type=${tInfo?.type}, shape=${tInfo?.shape?.contentToString()}")
+            }
             true
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            Log.e("OnnxInferenceManager", "loadStt: Failed to create session for ${modelFile.absolutePath}", t)
             closeSttLocked()
             _isSttLoaded.value = false
             false
@@ -186,16 +216,44 @@ class OnnxInferenceManager(context: Context) {
             ?.firstOrNull()
     }
 
-    /** Parses a `["a", "b", ...]` JSON string array without a JSON library. */
+    /** Parses vocab from JSON (supports JSON array ["a", "b"] or JSON object mapping token->index or index->token). */
     private fun parseVocab(json: String): List<String> {
-        val pattern = Regex("\"((?:[^\"\\\\]|\\\\.)*)\"")
-        return pattern.findAll(json).map { match ->
-            match.groupValues[1]
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
-                .replace("\\n", "\n")
-                .replace("\\t", "\t")
-        }.toList()
+        return try {
+            val trimmed = json.trim()
+            if (trimmed.startsWith("[")) {
+                val array = JSONArray(trimmed)
+                List(array.length()) { i -> array.getString(i) }
+            } else if (trimmed.startsWith("{")) {
+                val obj = JSONObject(trimmed)
+                val keys = obj.keys()
+                val entries = mutableListOf<Pair<Int, String>>()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = obj.optInt(k, -1)
+                    if (v >= 0) {
+                        entries.add(v to k)
+                    } else {
+                        val intKey = k.toIntOrNull()
+                        if (intKey != null) {
+                            entries.add(intKey to obj.getString(k))
+                        }
+                    }
+                }
+                entries.sortBy { it.first }
+                entries.map { it.second }
+            } else {
+                emptyList()
+            }
+        } catch (_: Exception) {
+            val pattern = Regex("\"((?:[^\"\\\\]|\\\\.)*)\"")
+            pattern.findAll(json).map { match ->
+                match.groupValues[1]
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\")
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t")
+            }.toList()
+        }
     }
 
     // =========================================================================
@@ -208,9 +266,19 @@ class OnnxInferenceManager(context: Context) {
      * @return the transcription, or an empty string on any failure.
      */
     fun transcribe(pcm16k: ShortArray): String {
-        val session = sttSession ?: return ""
-        val env = ortEnv ?: return ""
-        if (pcm16k.size < 160) return "" // shorter than one 10 ms hop
+        val session = sttSession ?: run {
+            Log.w("OnnxInferenceManager", "transcribe: sttSession is null")
+            return ""
+        }
+        val env = ortEnv ?: run {
+            Log.w("OnnxInferenceManager", "transcribe: ortEnv is null")
+            return ""
+        }
+        if (pcm16k.size < 160) {
+            Log.w("OnnxInferenceManager", "transcribe: audio too short (${pcm16k.size} samples)")
+            return ""
+        }
+        val inputTensors = mutableMapOf<String, OnnxTensor>()
         return try {
             // 1) Real log-mel features: 25 ms window / 10 ms hop / 80 filters.
             val mels = LogMel.compute(
@@ -218,92 +286,158 @@ class OnnxInferenceManager(context: Context) {
                 sampleRate = STT_SAMPLE_RATE_HZ,
                 nMel = MEL_BINS
             )
-            if (mels.isEmpty()) return ""
+            if (mels.isEmpty()) {
+                Log.w("OnnxInferenceManager", "transcribe: LogMel returned empty")
+                return ""
+            }
 
-            // DEVICE-VERIFY: the exported model may expect per-feature mean/var
-            // normalization (or none). Standard global mean/var used here.
             val normalized = normalizeFeatures(mels)
             val frames = normalized.size
 
-            // 2) Build the input tensor. The model's declared input shape
-            // decides between [1, frames, 80] and [1, 80, frames].
-            val inputName = session.inputNames.iterator().next()
-            val inputInfo = session.inputInfo[inputName]?.info as? TensorInfo
-            val shape = inputInfo?.shape
-            val batchMajor = shape != null && shape.size == 3 && shape[2] == MEL_BINS.toLong()
+            // 2) Build all required inputs dynamically based on session.inputInfo.
+            // NeMo Conformer CTC typically requires:
+            //   - audio_signal: float32 mel spectrogram of shape [1, 80, frames] or [1, frames, 80]
+            //   - length: int32 or int64 sequence length of shape [1] containing value `frames`
+            for ((name, nodeInfo) in session.inputInfo) {
+                val tInfo = nodeInfo.info as? TensorInfo
+                val type = tInfo?.type
+                val shape = tInfo?.shape
 
-            val flat = FloatBuffer.allocate(frames * MEL_BINS)
-            if (batchMajor) {
-                for (frame in normalized) for (v in frame) flat.put(v)
-            } else {
-                for (bin in 0 until MEL_BINS) for (frame in normalized) flat.put(frame[bin])
-            }
-            flat.rewind()
-            val dims = if (batchMajor) {
-                longArrayOf(1L, frames.toLong(), MEL_BINS.toLong())
-            } else {
-                longArrayOf(1L, MEL_BINS.toLong(), frames.toLong())
-            }
-            val inputTensor = OnnxTensor.createTensor(env, flat, dims)
-
-            // 3) Run and CTC-greedy decode the logits.
-            var resultText = ""
-            session.run(mapOf(inputName to inputTensor)).use { result ->
-                val entry = result.iterator().next()
-                val logits = entry.value as? OnnxTensor
-                val logitInfo = logits?.info
-                val logitShape = logitInfo?.shape
-                val numClasses = if (logitShape != null && logitShape.size >= 2) {
-                    logitShape[logitShape.size - 1].toInt()
+                if (type == OnnxJavaType.FLOAT || (shape != null && shape.size == 3)) {
+                    val batchMajor = shape != null && shape.size == 3 && shape[1] != MEL_BINS.toLong() && shape[2] == MEL_BINS.toLong()
+                    val flat = FloatBuffer.allocate(frames * MEL_BINS)
+                    if (batchMajor) {
+                        for (frame in normalized) for (v in frame) flat.put(v)
+                    } else {
+                        for (bin in 0 until MEL_BINS) for (frame in normalized) flat.put(frame[bin])
+                    }
+                    flat.rewind()
+                    val dims = if (batchMajor) {
+                        longArrayOf(1L, frames.toLong(), MEL_BINS.toLong())
+                    } else {
+                        longArrayOf(1L, MEL_BINS.toLong(), frames.toLong())
+                    }
+                    inputTensors[name] = OnnxTensor.createTensor(env, flat, dims)
+                    Log.d("OnnxInferenceManager", "transcribe: input '$name' float tensor shape=${dims.contentToString()}")
+                } else if (name.contains("len", ignoreCase = true) || (shape != null && shape.size == 1)) {
+                    if (type == OnnxJavaType.INT32) {
+                        val buf = IntBuffer.wrap(intArrayOf(frames))
+                        inputTensors[name] = OnnxTensor.createTensor(env, buf, longArrayOf(1L))
+                    } else {
+                        val buf = LongBuffer.wrap(longArrayOf(frames.toLong()))
+                        inputTensors[name] = OnnxTensor.createTensor(env, buf, longArrayOf(1L))
+                    }
+                    Log.d("OnnxInferenceManager", "transcribe: input '$name' length tensor value=$frames type=$type")
                 } else {
-                    sttVocab.size
-                }
-                val logitBuffer = logits?.floatBuffer
-                if (logitBuffer != null && numClasses > 0) {
-                    val timeSteps = logitBuffer.remaining() / numClasses
-                    resultText = greedyCtcDecode(logitBuffer, timeSteps, numClasses)
+                    Log.w("OnnxInferenceManager", "transcribe: unrecognized input '$name' type=$type shape=${shape?.contentToString()}")
                 }
             }
-            inputTensor.close()
+
+            // Fallback if inputs couldn't be resolved by name/shape
+            if (inputTensors.isEmpty()) {
+                val inputName = session.inputNames.iterator().next()
+                val flat = FloatBuffer.allocate(frames * MEL_BINS)
+                for (bin in 0 until MEL_BINS) for (frame in normalized) flat.put(frame[bin])
+                flat.rewind()
+                inputTensors[inputName] = OnnxTensor.createTensor(env, flat, longArrayOf(1L, MEL_BINS.toLong(), frames.toLong()))
+            }
+
+            // 3) Run inference and CTC-greedy decode the logits.
+            var resultText = ""
+            session.run(inputTensors).use { result ->
+                var logitsTensor: OnnxTensor? = null
+                for (entry in result) {
+                    val t = entry.value as? OnnxTensor
+                    val sh = t?.info?.shape
+                    if (sh != null && sh.size == 3) {
+                        logitsTensor = t
+                        break
+                    }
+                }
+                if (logitsTensor == null) {
+                    val first = result.iterator().next()
+                    logitsTensor = first.value as? OnnxTensor
+                }
+
+                if (logitsTensor != null) {
+                    val logitShape = logitsTensor.info.shape
+                    val timeFirst = logitShape.size >= 3 && logitShape[2] >= sttVocab.size
+                    val timeSteps: Int
+                    val numClasses: Int
+                    if (timeFirst) {
+                        timeSteps = logitShape[1].toInt()
+                        numClasses = logitShape[2].toInt()
+                    } else if (logitShape.size >= 3) {
+                        numClasses = logitShape[1].toInt()
+                        timeSteps = logitShape[2].toInt()
+                    } else {
+                        numClasses = sttVocab.size
+                        timeSteps = logitsTensor.floatBuffer.remaining() / numClasses
+                    }
+                    val logitBuffer = logitsTensor.floatBuffer
+                    resultText = greedyCtcDecode(logitBuffer, timeSteps, numClasses, timeFirst)
+                }
+            }
+            Log.d("OnnxInferenceManager", "transcribe success: '$resultText'")
             resultText
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            Log.e("OnnxInferenceManager", "transcribe exception", t)
             ""
+        } finally {
+            for (tensor in inputTensors.values) {
+                runCatching { tensor.close() }
+            }
         }
     }
 
     /**
-     * CTC greedy decode: argmax per frame, collapse repeats, drop the blank.
-     *
-     * DEVICE-VERIFY: AI4Bharat IndicConformer exports use blank id 0 with
-     * vocab ids shifted by one (numClasses == vocab.size + 1). If the export
-     * has no blank, the shift is skipped automatically.
+     * CTC greedy decode: argmax per frame, collapse repeats, drop the blank,
+     * and reassemble SentencePiece subwords into natural text.
      */
     private fun greedyCtcDecode(
         logits: FloatBuffer,
         timeSteps: Int,
-        numClasses: Int
+        numClasses: Int,
+        timeFirst: Boolean = true
     ): String {
-        val hasBlank = numClasses == sttVocab.size + 1
-        val blankId = if (hasBlank) 0 else -1
+        // In NeMo CTC exports, blank is numClasses - 1 (when numClasses == vocab.size + 1).
+        val blankId = if (numClasses >= sttVocab.size) numClasses - 1 else 0
         val sb = StringBuilder()
-        var previous = blankId
+        var previous = -1
+
         for (t in 0 until timeSteps) {
-            var best = blankId
+            var best = -1
             var bestValue = Float.NEGATIVE_INFINITY
             for (c in 0 until numClasses) {
-                val v = logits.get(t * numClasses + c)
+                val v = if (timeFirst) {
+                    logits.get(t * numClasses + c)
+                } else {
+                    logits.get(c * timeSteps + t)
+                }
                 if (v > bestValue) {
                     bestValue = v
                     best = c
                 }
             }
+            // CTC collapse: skip blanks and consecutive duplicate symbols
             if (best != blankId && best != previous) {
-                val vocabIndex = if (hasBlank) best - 1 else best
-                if (vocabIndex in sttVocab.indices) sb.append(sttVocab[vocabIndex])
+                if (best in sttVocab.indices) {
+                    val token = sttVocab[best]
+                    if (token != "<unk>" && token != "<pad>" && token != "<s>" && token != "</s>") {
+                        sb.append(token)
+                    }
+                }
             }
             previous = best
         }
+
+        // SentencePiece space decoding:
+        // Replace U+2581 (lower one eighth block) and '▁' with standard space.
         return sb.toString()
+            .replace("\u2581", " ")
+            .replace("▁", " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     // =========================================================================
@@ -392,20 +526,29 @@ class OnnxInferenceManager(context: Context) {
     }
 
     private fun normalizeFeatures(mels: Array<FloatArray>): Array<FloatArray> {
-        var sum = 0.0
-        var count = 0
-        for (frame in mels) for (v in frame) {
-            sum += v
-            count++
+        val numFrames = mels.size
+        if (numFrames == 0) return mels
+        val numBins = mels[0].size
+        val normalized = Array(numFrames) { FloatArray(numBins) }
+
+        // Per-feature (per-channel) normalization across time frames
+        for (b in 0 until numBins) {
+            var sum = 0.0
+            for (f in 0 until numFrames) {
+                sum += mels[f][b]
+            }
+            val mean = sum / numFrames
+            var sumSq = 0.0
+            for (f in 0 until numFrames) {
+                val diff = mels[f][b] - mean
+                sumSq += diff * diff
+            }
+            val std = sqrt(sumSq / numFrames).coerceAtLeast(1e-5)
+            for (f in 0 until numFrames) {
+                normalized[f][b] = ((mels[f][b] - mean) / std).toFloat()
+            }
         }
-        if (count == 0) return mels
-        val mean = sum / count
-        var variance = 0.0
-        for (frame in mels) for (v in frame) variance += (v - mean) * (v - mean)
-        val std = sqrt(variance / count).coerceAtLeast(1e-5)
-        return Array(mels.size) { f ->
-            FloatArray(mels[f].size) { b -> ((mels[f][b] - mean) / std).toFloat() }
-        }
+        return normalized
     }
 
     // =========================================================================
@@ -439,8 +582,9 @@ class OnnxInferenceManager(context: Context) {
 }
 
 /**
- * Minimal real log-mel spectrogram: pre-emphasis -> 25 ms hamming windows at
- * 10 ms hops -> |FFT|^2 -> 80 triangular mel filters -> log.
+ * Standard log-mel spectrogram for NeMo IndicConformer models:
+ * Audio normalized to [-1.0, 1.0] -> 25 ms Hann window at 10 ms hops ->
+ * |FFT|^2 -> 80 triangular mel filters with Slaney area normalization -> log.
  */
 object LogMel {
 
@@ -456,8 +600,9 @@ object LogMel {
         val hopLen = sampleRate * hopMs / 1000
         if (samples.size < windowLen) return emptyArray()
 
-        val hamming = FloatArray(windowLen) { i ->
-            (0.54 - 0.46 * cos(2.0 * PI * i / (windowLen - 1))).toFloat()
+        // Standard Hann window (matches NeMo torch.hann_window)
+        val hann = FloatArray(windowLen) { i ->
+            (0.5 * (1.0 - cos(2.0 * PI * i / (windowLen - 1)))).toFloat()
         }
         val melFilters = melFilterbank(sampleRate, nFft, nMel)
 
@@ -468,10 +613,9 @@ object LogMel {
         for (frame in 0 until frames) {
             val start = frame * hopLen
             for (i in 0 until windowLen) {
-                // pre-emphasis 0.97 applied inline on the raw sample
-                val x = if (i == 0) samples[start].toFloat()
-                else samples[start + i] - 0.97f * samples[start + i - 1]
-                windowed[i] = x * hamming[i]
+                // Audio normalized to [-1.0, 1.0]. Zero pre-emphasis (NeMo IndicConformer uses raw signal).
+                val x = samples[start + i].toFloat() / 32768.0f
+                windowed[i] = x * hann[i]
             }
             for (i in windowLen until nFft) windowed[i] = 0f
 
@@ -480,14 +624,15 @@ object LogMel {
             for (m in 0 until nMel) {
                 var energy = 0f
                 for (k in 0 until nFft / 2 + 1) energy += power[k] * melFilters[m][k]
-                mel[m] = ln((energy + 1e-10f).toDouble()).toFloat()
+                // Log energy clamped at 1e-5 (matches NeMo clamp)
+                mel[m] = ln(max(energy, 1e-5f).toDouble()).toFloat()
             }
             spectrogram[frame] = mel
         }
         return spectrogram
     }
 
-    /** Slaney-style triangular filterbank, (nMel x (nFft/2 + 1)). */
+    /** Slaney-style triangular filterbank with area normalization, (nMel x (nFft/2 + 1)). */
     private fun melFilterbank(sampleRate: Int, nFft: Int, nMel: Int): Array<FloatArray> {
         val fMax = sampleRate / 2.0
         val melMin = hzToMel(0.0)
@@ -505,11 +650,13 @@ object LogMel {
             val left = bins[m - 1]
             val center = bins[m]
             val right = bins[m + 1]
+            // Slaney bandwidth area normalization
+            val enorm = (2.0 / (hzPoints[m + 1] - hzPoints[m - 1])).toFloat()
             for (k in left until center) {
-                if (center > left) filters[m - 1][k] = ((k - left).toFloat() / (center - left))
+                if (center > left) filters[m - 1][k] = ((k - left).toFloat() / (center - left)) * enorm
             }
             for (k in center..right) {
-                if (right > center) filters[m - 1][k] = ((right - k).toFloat() / (right - center))
+                if (right > center) filters[m - 1][k] = ((right - k).toFloat() / (right - center)) * enorm
             }
         }
         return filters

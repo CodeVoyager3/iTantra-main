@@ -100,11 +100,18 @@ class ModelStorageManager(context: Context) {
         freedBytes
     }
 
-    /** A pack counts as installed only if its extracted manifest is present. */
+    /** A pack counts as installed if its manifest, stt/tts subfolders, or onnx model files exist. */
     private fun scanInstalled(): Map<String, Long> {
         val children = modelsDir.listFiles() ?: return emptyMap()
         return children
-            .filter { it.isDirectory && File(it, "manifest.json").exists() }
+            .filter { dir ->
+                dir.isDirectory && (
+                    File(dir, "manifest.json").exists() ||
+                    File(dir, "stt").exists() ||
+                    File(dir, "tts").exists() ||
+                    (dir.listFiles()?.any { f -> f.extension.equals("onnx", ignoreCase = true) || f.isDirectory } == true)
+                )
+            }
             .associate { it.name to dirSizeBytes(it) }
     }
 

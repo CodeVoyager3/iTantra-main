@@ -35,12 +35,12 @@ class AudioPlaybackEngine(context: Context) {
     private var speaker = true
 
     @Volatile
-    private var volume = 0.85f
+    private var volume = 1.0f
 
     private val _streamToSpeaker = MutableStateFlow(true)
     val streamToSpeaker: StateFlow<Boolean> = _streamToSpeaker.asStateFlow()
 
-    private val _volume01 = MutableStateFlow(0.85f)
+    private val _volume01 = MutableStateFlow(1.0f)
     val volume01: StateFlow<Float> = _volume01.asStateFlow()
 
     /**
@@ -133,11 +133,13 @@ class AudioPlaybackEngine(context: Context) {
         val am = audioManager ?: return
         try {
             if (speaker) {
+                // Loudspeaker: normal media mode with speakerphone forced on
                 am.mode = AudioManager.MODE_NORMAL
-                am.isSpeakerphoneOn = false
-            } else {
-                am.mode = AudioManager.MODE_IN_COMMUNICATION
                 am.isSpeakerphoneOn = true
+            } else {
+                // Earpiece: communication mode with speakerphone off
+                am.mode = AudioManager.MODE_IN_COMMUNICATION
+                am.isSpeakerphoneOn = false
             }
         } catch (_: Exception) {
             // Routing is best-effort; playback still works with defaults.

@@ -221,12 +221,39 @@ class WifiDirectMeshManager(context: Context) {
         }
     }
 
+    fun isWifiConnected(): Boolean {
+        return try {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return false
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (iface.isLoopback || !iface.isUp) continue
+                if (iface.name.startsWith("wlan") || iface.name.startsWith("eth")) {
+                    for (interfaceAddress in iface.interfaceAddresses) {
+                        val addr = interfaceAddress.address
+                        if (addr is Inet4Address && !addr.isLoopbackAddress && !addr.isLinkLocalAddress) {
+                            return true
+                        }
+                    }
+                }
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /** Creates a P2P group, making this device the Group Owner. */
     fun createGroup() {
         if (manager == null) return
+        if (isWifiConnected()) {
+            Log.i("WifiDirectMeshManager", "Already connected to Wi-Fi LAN; skipping P2P group creation to preserve LAN link")
+            return
+        }
         try {
             manager?.createGroup(channel, actionLog)
-        } catch (_: Exception) {
+            Log.i("WifiDirectMeshManager", "Requested Wi-Fi Direct P2P group creation")
+        } catch (e: Exception) {
+            Log.w("WifiDirectMeshManager", "createGroup threw exception", e)
         }
     }
 
@@ -333,6 +360,7 @@ class WifiDirectMeshManager(context: Context) {
                 val packet = DatagramPacket(buffer, buffer.size)
                 s.receive(packet)
                 if (packet.length > 0) {
+                    Log.i("WifiDirectMeshManager", "UDP rx: received ${packet.length} bytes from ${packet.address}:${packet.port}")
                     _incomingDatagrams.tryEmit(packet.data.copyOf(packet.length))
                 }
             } catch (_: SocketException) {
@@ -347,6 +375,7 @@ class WifiDirectMeshManager(context: Context) {
         val list = mutableListOf<InetAddress>()
         try {
             list.add(InetAddress.getByName(UDP_BROADCAST_HOST))
+            try { list.add(InetAddress.getByName("192.168.49.255")) } catch (_: Exception) {}
             val interfaces = NetworkInterface.getNetworkInterfaces() ?: return list
             while (interfaces.hasMoreElements()) {
                 val iface = interfaces.nextElement()
@@ -364,6 +393,9 @@ class WifiDirectMeshManager(context: Context) {
 
     /** Broadcasts [bytes] to the ad-hoc LAN / Wi-Fi network. */
     fun broadcastDatagram(bytes: ByteArray): Boolean {
+        if (socket == null) {
+            startUdpBroadcast()
+        }
         val s = socket ?: return false
         val addresses = getBroadcastAddresses()
         var sent = false
@@ -371,7 +403,9 @@ class WifiDirectMeshManager(context: Context) {
             try {
                 s.send(DatagramPacket(bytes, bytes.size, addr, UDP_PORT))
                 sent = true
-            } catch (_: Exception) {
+                Log.d("WifiDirectMeshManager", "broadcastDatagram sent ${bytes.size} bytes to $addr:$UDP_PORT")
+            } catch (e: Exception) {
+                Log.w("WifiDirectMeshManager", "broadcastDatagram failed to $addr:$UDP_PORT: ${e.message}")
             }
         }
         return sent
@@ -379,6 +413,9 @@ class WifiDirectMeshManager(context: Context) {
 
     /** Sends [bytes] to a single host:port (direct-IP links). */
     fun sendDatagram(bytes: ByteArray, host: String, port: Int = UDP_PORT): Boolean {
+        if (socket == null) {
+            startUdpBroadcast()
+        }
         val s = socket ?: return false
         return try {
             s.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(host), port))

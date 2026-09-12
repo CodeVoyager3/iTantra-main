@@ -288,20 +288,15 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
-    /** Prefers the foreground service so the beacon survives backgrounding. */
+    /** Starts foreground keeper service and initiates BLE beacon advertising. */
     private fun startBeaconAdvertising(payload: DistressBeaconPayload) {
         val power = currentBeaconTxPower()
-        val startedViaService = try {
+        try {
             TacticalMeshService.start(getApplication(), payload, power)
-            true
         } catch (_: Exception) {
-            // Background-start restriction or similar — use the in-process
-            // advertiser instead.
-            false
+            // Foreground start restriction fallback
         }
-        if (!startedViaService) {
-            bleMeshManager?.startAdvertising(payload, power)
-        }
+        bleMeshManager?.startAdvertising(payload, power)
     }
 
     private fun stopBeaconAdvertising() {
@@ -330,6 +325,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
         // Loud siren beacon (+ localized TTS announcement when installed).
         startAudioBeacon(_uiState.value.selectedLanguage)
+
+        // Ensure voice capture is actively listening so victim can speak at any time
+        startMeshVoiceCapture()
     }
 
     fun stopSos() {
@@ -345,6 +343,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         wifiDirectMeshManager?.removeGroup()
         stopBleScanIfIdle()
         stopMeshUdpIfIdle()
+        stopMeshVoiceCaptureIfIdle()
     }
 
     fun isBluetoothEnabled(): Boolean = bleMeshManager?.isBluetoothEnabled() ?: false
@@ -428,6 +427,39 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         if (_isMicMuted.value) {
             _isTransmitting.value = false
         }
+    }
+
+    private val _isPttActive = MutableStateFlow(false)
+    val isPttActive: StateFlow<Boolean> = _isPttActive.asStateFlow()
+
+    fun startPtt() {
+        startMeshVoiceCapture()
+        synchronized(voiceTurnBuffer ?: this) {
+            voiceTurnBuffer?.reset()
+        }
+        _isMicMuted.value = false
+        _isPttActive.value = true
+        _isVadSpeaking.value = true
+        _isTransmitting.value = true
+        _uiState.update {
+            it.copy(
+                channelState = RadioChannelState.TRANSMITTING,
+                currentTranscript = "🎙️ Listening (PTT)..."
+            )
+        }
+    }
+
+    fun stopPtt() {
+        _isPttActive.value = false
+        _isVadSpeaking.value = false
+        _isTransmitting.value = false
+        _uiState.update {
+            it.copy(
+                channelState = RadioChannelState.STANDBY,
+                currentTranscript = "🧠 Transcribing..."
+            )
+        }
+        flushVoiceTurn()
     }
 
     fun setTransmitting(transmitting: Boolean) {
@@ -545,6 +577,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             bleMeshManager?.startScanning()
             startRescuerBeaconAdvertising()
             wifiDirectMeshManager?.startUdpBroadcast()
+            startMeshVoiceCapture()
         } else {
             stopRescuerBeaconAdvertising()
             stopBleScanIfIdle()
@@ -609,12 +642,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             payload = ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(victim.nodeId).array()
         )
         wifiDirectMeshManager?.startUdpBroadcast()
-        viewModelScope.launch {
-            repeat(3) {
-                wifiDirectMeshManager?.broadcastDatagram(PacketFraming.encode(linkRequest))
-                delay(60)
-            }
-        }
+        broadcastMeshPacket(PacketFraming.encode(linkRequest), victim.nodeId)
         startMeshVoiceCapture()
     }
 
@@ -627,7 +655,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 msgType = PacketFraming.MSG_TYPE_VOICE_LINK_CLOSE,
                 payload = ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(target.nodeId).array()
             )
-            wifiDirectMeshManager?.broadcastDatagram(PacketFraming.encode(close))
+            broadcastMeshPacket(PacketFraming.encode(close))
         }
         _connectedVictimIntercom.value = null
         _modelWarningMessage.value = null
@@ -1027,32 +1055,38 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     private var lastRescuerContactEpochMs = 0L
-    private val recentRelayedPackets = LinkedHashSet<Long>()
+    private val recentRelayedPackets = LinkedHashMap<Long, Long>()
 
     private fun handleIncomingDatagram(bytes: ByteArray) {
-        val packet = PacketFraming.decode(bytes) ?: return
+        val packet = PacketFraming.decode(bytes) ?: run {
+            Log.w("MissionControl", "handleIncomingDatagram: packet failed CRC or decoding (${bytes.size} bytes)")
+            return
+        }
         // Never process our own packets (prevents loopback echo)
         if (packet.nodeId == _nodeId.value) return
+        Log.i("MissionControl", "handleIncomingDatagram: accepted packet type=${packet.msgType}, nodeId=${packet.nodeId}, ttl=${packet.ttl}, payloadBytes=${packet.payload.size}")
 
-        // Multi-hop mesh relay: deduplicate and forward packets with TTL > 1
+        // Multi-hop mesh relay: deduplicate within 3-second window
         val packetSignature = ((packet.nodeId xor (packet.msgType.toLong() shl 16)) xor packet.payload.contentHashCode().toLong())
-        val isAlreadySeen = synchronized(recentRelayedPackets) {
-            if (recentRelayedPackets.contains(packetSignature)) {
+        val now = System.currentTimeMillis()
+        val isDuplicate = synchronized(recentRelayedPackets) {
+            val lastSeen = recentRelayedPackets[packetSignature]
+            if (lastSeen != null && (now - lastSeen) < 3000L) {
                 true
             } else {
                 if (recentRelayedPackets.size > 256) {
-                    val first = recentRelayedPackets.iterator().next()
-                    recentRelayedPackets.remove(first)
+                    val firstKey = recentRelayedPackets.keys.firstOrNull()
+                    if (firstKey != null) recentRelayedPackets.remove(firstKey)
                 }
-                recentRelayedPackets.add(packetSignature)
+                recentRelayedPackets[packetSignature] = now
                 false
             }
         }
-        if (isAlreadySeen) return // Deduplicate
+        if (isDuplicate) return // Deduplicate within 3 seconds
 
         if (packet.ttl > 1) {
             val relayedPacket = packet.copy(ttl = packet.ttl - 1)
-            wifiDirectMeshManager?.broadcastDatagram(PacketFraming.encode(relayedPacket))
+            broadcastMeshPacket(PacketFraming.encode(relayedPacket))
         }
 
         when (packet.msgType) {
@@ -1124,7 +1158,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                         msgType = PacketFraming.MSG_TYPE_VOICE_LINK_ACK,
                         payload = ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(packet.nodeId).array()
                     )
-                    wifiDirectMeshManager?.broadcastDatagram(PacketFraming.encode(ackPacket))
+                    broadcastMeshPacket(PacketFraming.encode(ackPacket), packet.nodeId)
                 }
             }
             PacketFraming.MSG_TYPE_VOICE_LINK_ACK -> {
@@ -1177,9 +1211,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 synchronized(voiceTurnBuffer ?: this) {
                     voiceTurnBuffer?.write(frame, 0, frame.size)
                 }
-                // If the user speaks continuously for ~2 seconds (64 KB PCM),
-                // flush interim segment so text is transmitted live as they speak!
-                if ((voiceTurnBuffer?.size() ?: 0) >= AudioCaptureEngine.SAMPLE_RATE_HZ * 2 * 2) {
+                // Cap at 4.0 seconds of continuous speech for responsive turn-taking (128,000 bytes)
+                if ((voiceTurnBuffer?.size() ?: 0) >= AudioCaptureEngine.SAMPLE_RATE_HZ * 2 * 4) {
                     flushVoiceTurn()
                 }
             }
@@ -1189,18 +1222,22 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _vadStatus.value = if (speaking) VadStatus.SPEECH_DETECTED else VadStatus.SILENCE
             _isTransmitting.value = speaking && !_isMicMuted.value
             _uiState.update {
-                it.copy(channelState = if (speaking) RadioChannelState.TRANSMITTING else RadioChannelState.STANDBY)
-            }
-            if (!speaking) {
-                // Speech paused: transcribe and transmit turn immediately
-                flushVoiceTurn()
+                it.copy(
+                    channelState = if (speaking) RadioChannelState.TRANSMITTING else RadioChannelState.STANDBY,
+                    currentTranscript = if (speaking && !_isMicMuted.value && !_isPttActive.value) "🎙️ Listening..." else it.currentTranscript
+                )
             }
         }
         capture.onLevelChanged = { level -> _audioLevel.value = level }
         capture.onSpeechProbability = { prob -> _speechProbability.value = prob }
         capture.onEndOfTurn = {
+            _uiState.update {
+                it.copy(
+                    channelState = RadioChannelState.STANDBY,
+                    currentTranscript = if (it.currentTranscript.startsWith("🎙️")) "🧠 Transcribing..." else it.currentTranscript
+                )
+            }
             flushVoiceTurn()
-            _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
         }
         capture.start()
     }
@@ -1209,7 +1246,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         val needed = _isWalkieActive.value ||
             _isBroadcastingToAll.value ||
             _connectedVictimIntercom.value != null ||
-            (_isSosBroadcasting.value && _connectedRescuer.value != null)
+            _isSosBroadcasting.value ||
+            _isRescueActive.value ||
+            _isPttActive.value
         if (!needed) {
             audioCaptureEngine?.stop()
             synchronized(voiceTurnBuffer ?: this) {
@@ -1221,6 +1260,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     /**
      * Converts the buffered voice turn to text via On-Device STT (IndicConformer)
      * and broadcasts ONLY the lightweight text packet (~20-50 bytes) over the disaster mesh.
+     * ZERO raw audio is transmitted — receiver synthesizes clean audio locally via TTS.
      */
     private fun flushVoiceTurn() {
         val buffer = voiceTurnBuffer ?: return
@@ -1229,44 +1269,84 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             pcmBytes = buffer.toByteArray()
             buffer.reset()
         }
-        // Discard very short clicks (< 250ms of audio = 8000 bytes)
-        if (pcmBytes.size < 8000) return
+        // Discard only tiny clicks (< 100ms of audio = 3200 bytes)
+        if (pcmBytes.size < 3200) {
+            Log.d("MissionControl", "flushVoiceTurn: Discarding click (<100ms, ${pcmBytes.size} bytes)")
+            viewModelScope.launch(Dispatchers.Main) {
+                if (_uiState.value.currentTranscript in listOf("🎙️ Listening...", "🎙️ Listening (PTT)...", "🧠 Transcribing...")) {
+                    _uiState.update { it.copy(currentTranscript = "") }
+                }
+            }
+            return
+        }
 
         val pcmShorts = pcmBytesToShorts(pcmBytes)
         val selectedLang = _uiState.value.selectedLanguage
-        val langCode = selectedLang.code
+        val langCode = selectedLang.code       // e.g. "hi", "en"
+        val langTag = selectedLang.languageTag  // e.g. "hi-IN", "en-IN"
 
         viewModelScope.launch(Dispatchers.Default) {
+            withContext(Dispatchers.Main) {
+                _uiState.update { it.copy(currentTranscript = "🧠 Transcribing...") }
+            }
             var transcribedText = ""
             val onnx = onnxInferenceManager
 
-            if (onnx != null && modelStorageManager.isInstalled(langCode)) {
+            // Check model installation using both short code and full tag
+            val isInstalled = modelStorageManager.isInstalled(langCode) ||
+                modelStorageManager.isInstalled(langTag)
+
+            if (isInstalled && onnx != null) {
                 try {
-                    val loaded = onnx.loadStt(langCode) || onnx.loadStt("${langCode}-IN")
+                    val loaded = onnx.loadStt(langTag) ||
+                        onnx.loadStt(langCode) ||
+                        onnx.loadStt("${langCode}-IN")
                     if (loaded) {
                         transcribedText = onnx.transcribe(pcmShorts).trim()
+                        Log.d("MissionControl", "flushVoiceTurn: Transcribed text: '$transcribedText'")
+                    } else {
+                        Log.w("MissionControl", "flushVoiceTurn: loadStt failed for $langTag / $langCode")
                     }
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    Log.e("MissionControl", "flushVoiceTurn: STT exception", e)
                     transcribedText = ""
                 }
-            }
-
-            if (transcribedText.isBlank()) {
-                if (!modelStorageManager.isInstalled(langCode)) {
-                    _modelWarningMessage.value = "Neural STT pack for ${selectedLang.englishName} is not installed. Spoken voice requires language pack to transcribe."
+            } else if (!isInstalled) {
+                Log.w("MissionControl", "flushVoiceTurn: Neural STT pack not installed for $langCode / $langTag")
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(currentTranscript = "") }
+                    _modelWarningMessage.value =
+                        "Neural STT pack for ${selectedLang.englishName} is NOT downloaded. Use 🗣️ DICTATE or Quick Phrases below, or download pack in Settings → Models."
                 }
                 return@launch
             }
 
-            _modelWarningMessage.value = null
+            // Filter out blank or single-character noise artifacts (like stray 'ह' or punctuation)
+            val cleanText = transcribedText.trim()
+            if (cleanText.isBlank() || (cleanText.length == 1 && !cleanText[0].isLetterOrDigit())) {
+                Log.d("MissionControl", "flushVoiceTurn: Blank or noise transcription ('$cleanText'), dropping turn")
+                withContext(Dispatchers.Main) {
+                    if (_isPttActive.value) {
+                        _uiState.update { it.copy(currentTranscript = "⚠️ Voice unclear — Speak closer or use 🗣️ DICTATE") }
+                    } else if (_uiState.value.currentTranscript in listOf("🎙️ Listening...", "🧠 Transcribing...")) {
+                        // Ambient silence/fan noise flush — revert to clean state so last sent phrase isn't wiped
+                        _uiState.update { it.copy(currentTranscript = "") }
+                    }
+                }
+                return@launch
+            }
+
+            withContext(Dispatchers.Main) {
+                _modelWarningMessage.value = null
+            }
 
             // 1. Update sender's local UI transcript and message log
             withContext(Dispatchers.Main) {
-                _uiState.update { it.copy(currentTranscript = transcribedText) }
+                _uiState.update { it.copy(currentTranscript = cleanText) }
                 val sentMsg = VoiceMessageEntity(
                     id = System.currentTimeMillis(),
                     messageUid = UUID.randomUUID().toString(),
-                    text = transcribedText,
+                    text = cleanText,
                     senderCallsign = _callsign.value,
                     isLocal = true,
                     languageCode = langCode,
@@ -1276,20 +1356,53 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 _messageLogs.update { listOf(sentMsg) + it }
             }
 
-            // 2. Broadcast ONLY text over mesh (Wire format: "langCode|text")
-            val payloadString = "$langCode|$transcribedText"
+            // 2. Broadcast lightweight text packet over dual-transport mesh (Wire format: "langCode|text")
+            val payloadString = "$langCode|$cleanText"
             val textPacket = ItantraPacket(
                 nodeId = _nodeId.value,
                 ttl = _meshHopLimit.value,
                 msgType = PacketFraming.MSG_TYPE_TRANSLATED_TEXT,
                 payload = payloadString.toByteArray(Charsets.UTF_8)
             )
-            val encoded = PacketFraming.encode(textPacket)
-            repeat(3) {
-                wifiDirectMeshManager?.broadcastDatagram(encoded)
-                delay(40)
-            }
+            val encodedText = PacketFraming.encode(textPacket)
+            broadcastMeshPacket(encodedText)
         }
+    }
+
+    /**
+     * Broadcasts a direct text message across the mesh (e.g. from quick chips or dictation).
+     * Synthesizes audio via TTS on the receiver side.
+     */
+    fun sendBroadcastTextMessage(text: String) {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return
+        val selectedLang = _uiState.value.selectedLanguage
+        val langCode = selectedLang.code
+
+        viewModelScope.launch(Dispatchers.Main) {
+            _uiState.update { it.copy(currentTranscript = trimmed) }
+            val sentMsg = VoiceMessageEntity(
+                id = System.currentTimeMillis(),
+                messageUid = UUID.randomUUID().toString(),
+                text = trimmed,
+                senderCallsign = _callsign.value,
+                isLocal = true,
+                languageCode = langCode,
+                timestamp = System.currentTimeMillis(),
+                isAlert = _isSosBroadcasting.value
+            )
+            _messageLogs.update { listOf(sentMsg) + it }
+        }
+
+        val payloadString = "$langCode|$trimmed"
+        val textPacket = ItantraPacket(
+            nodeId = _nodeId.value,
+            ttl = _meshHopLimit.value,
+            msgType = PacketFraming.MSG_TYPE_TRANSLATED_TEXT,
+            payload = payloadString.toByteArray(Charsets.UTF_8)
+        )
+        val encodedText = PacketFraming.encode(textPacket)
+        broadcastMeshPacket(encodedText)
     }
 
     private var ttsPlaybackJob: Job? = null
@@ -1348,6 +1461,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    private var systemTtsVisualizerJob: Job? = null
+
     private fun speakWithSystemTts(text: String, langCode: String) {
         val tts = systemTts ?: run {
             Log.e("MissionControl", "systemTts is null, cannot speak")
@@ -1357,10 +1472,10 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         try {
             audioManager?.isSpeakerphoneOn = true
             audioManager?.mode = AudioManager.MODE_NORMAL
+            // Force maximum volume for emergency audio
             val maxVol = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 0
-            val curVol = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
-            if (maxVol > 0 && curVol < (maxVol * 0.8f).toInt()) {
-                audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, (maxVol * 0.85f).toInt(), 0)
+            if (maxVol > 0) {
+                audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, maxVol, 0)
             }
             val targetLocale = SupportedLanguage.fromCode(langCode).locale
             val langResult = tts.setLanguage(targetLocale)
@@ -1370,13 +1485,24 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
-                    _audioLevel.value = 0.75f
+                    // Start smooth visualizer animation loop
+                    systemTtsVisualizerJob?.cancel()
+                    systemTtsVisualizerJob = viewModelScope.launch {
+                        var tick = 0f
+                        while (true) {
+                            tick += 0.35f
+                            _audioLevel.value = 0.3f + 0.6f * kotlin.math.sin(tick.toDouble()).toFloat().coerceIn(0f, 1f)
+                            delay(80)
+                        }
+                    }
                 }
                 override fun onDone(utteranceId: String?) {
+                    systemTtsVisualizerJob?.cancel()
                     _audioLevel.value = 0f
                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                 }
                 override fun onError(utteranceId: String?) {
+                    systemTtsVisualizerJob?.cancel()
                     _audioLevel.value = 0f
                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                 }
@@ -1388,6 +1514,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "itantra_${System.currentTimeMillis()}")
         } catch (e: Exception) {
             Log.e("MissionControl", "Error in speakWithSystemTts", e)
+            systemTtsVisualizerJob?.cancel()
             _audioLevel.value = 0f
         }
     }
@@ -1783,7 +1910,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             payload = message.toByteArray(Charsets.UTF_8)
         )
         wifiDirectMeshManager?.startUdpBroadcast()
-        wifiDirectMeshManager?.broadcastDatagram(PacketFraming.encode(packet))
+        broadcastMeshPacket(PacketFraming.encode(packet))
     }
 
     fun playVoiceMessage(message: VoiceMessageEntity) {
@@ -1958,11 +2085,36 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    /**
+     * Broadcasts an encoded Itantra mesh packet across BOTH transports:
+     * 1. BLE GATT (guaranteed direct peer-to-peer off-grid link)
+     * 2. UDP LAN/P2P socket (high-bandwidth ad-hoc network link)
+     */
+    fun broadcastMeshPacket(packetBytes: ByteArray, targetNodeId: Long? = null) {
+        Log.i("MissionControl", "broadcastMeshPacket: dispatching ${packetBytes.size} bytes (targetNodeId=$targetNodeId)")
+        viewModelScope.launch(Dispatchers.IO) {
+            // 1. Off-grid BLE direct transmission
+            bleMeshManager?.broadcastPacket(packetBytes, targetNodeId)
+
+            // 2. High-speed UDP transmission (repeated bursts for packet-loss mitigation)
+            repeat(3) {
+                wifiDirectMeshManager?.broadcastDatagram(packetBytes)
+                delay(30)
+            }
+        }
+    }
+
     private fun observeEngineFlows() {
         // BLE scan results -> rescue victims / rescuer nodes / walkie peers.
         viewModelScope.launch {
             bleMeshManager?.discoveredBeacons?.collect { beacons ->
                 onBeaconsUpdated(beacons)
+            }
+        }
+        // BLE GATT incoming packets -> voice playback + link handling.
+        viewModelScope.launch {
+            bleMeshManager?.incomingPackets?.collect { bytes ->
+                handleIncomingDatagram(bytes)
             }
         }
         // Wi-Fi Direct peer list -> walkie discovered devices.

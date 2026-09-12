@@ -17,7 +17,6 @@ import android.os.PowerManager
 import com.itantra.app.MainActivity
 import com.itantra.app.R
 import com.itantra.app.mesh.BeaconTxPower
-import com.itantra.app.mesh.BleMeshManager
 import com.itantra.app.mesh.DistressBeaconPayload
 
 /**
@@ -80,7 +79,6 @@ class TacticalMeshService : Service() {
         }
     }
 
-    private var bleMesh: BleMeshManager? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val binder = object : android.os.Binder() {
@@ -90,7 +88,6 @@ class TacticalMeshService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        bleMesh = runCatching { BleMeshManager(this) }.getOrNull()
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
         wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "iTantra:TacticalBeaconWakeLock")?.apply {
             setReferenceCounted(false)
@@ -113,16 +110,14 @@ class TacticalMeshService : Service() {
         return START_NOT_STICKY
     }
 
-    /** Begins (or re-begins) BLE advertising with [payload]. */
+    /** Begins foreground keeper service to ensure beacon and radio survive backgrounding. */
     fun startBeacon(payload: DistressBeaconPayload, txPower: BeaconTxPower = BeaconTxPower.HIGH) {
         startAsForeground()
         runCatching { wakeLock?.acquire(60 * 60 * 1000L) } // 1-hour auto-release guard
-        bleMesh?.startAdvertising(payload, txPower)
     }
 
-    /** Stops advertising and shuts the service down. */
+    /** Shuts the foreground service down. */
     fun stopBeacon() {
-        bleMesh?.stopAdvertising()
         runCatching {
             if (wakeLock?.isHeld == true) wakeLock?.release()
         }
@@ -131,8 +126,6 @@ class TacticalMeshService : Service() {
     }
 
     override fun onDestroy() {
-        bleMesh?.shutdown()
-        bleMesh = null
         runCatching {
             if (wakeLock?.isHeld == true) wakeLock?.release()
         }
