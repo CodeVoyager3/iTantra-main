@@ -26,6 +26,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Android 13+: the beacon foreground-service notification needs this
          to be visible. Runtime prompt is not wired in MainActivity (left
          untouched); the FGS itself still runs without it. -->
