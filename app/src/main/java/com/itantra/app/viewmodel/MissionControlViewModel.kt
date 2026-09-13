@@ -2074,7 +2074,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 extendEchoGuard(pcm.size * 1000L / (AudioCaptureEngine.SAMPLE_RATE_HZ * 2))
                 audioPlaybackEngine?.play(pcm, AudioCaptureEngine.SAMPLE_RATE_HZ)
                 val rms = calculateRmsLevel(pcm)
-                _audioLevel.value = rms
+                markReceivingAudio(rms)
                 _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
             }
             PacketFraming.MSG_TYPE_VOICE_LINK_REQUEST -> {
@@ -2261,6 +2261,16 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             // Echo guard (defense in depth — the engine also gates): never
             // retransmit or transcribe audio captured during self-playback.
             if (!_isMicMuted.value && (_isVadSpeaking.value || _isPttActive.value) && !isEchoGuardActive()) {
+                // Real-time live audio streaming to paired Walkie-Talkie radios or active emergency intercom
+                val shouldStreamLiveAudio = (_isWalkieActive.value && settingsRepository.pairedWalkieNodeIds.value.isNotEmpty()) ||
+                    (_isRescueActive.value && _connectedVictimIntercom.value != null) ||
+                    (_isSosBroadcasting.value && _connectedRescuer.value != null) ||
+                    _isBroadcastingToAll.value
+
+                if (shouldStreamLiveAudio && !_isCrossLingualBlocked.value) {
+                    enqueueVoiceFrame(frame)
+                }
+
                 // Low-bitrate text mesh: speech frames accumulate locally for on-device STT.
                 val currentSize: Int
                 synchronized(voiceTurnBuffer ?: this) {
@@ -2541,9 +2551,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             } else if (!isInstalled) {
                 Log.w(voicePipelineTag, "[stt] neural pack not installed for $langCode / $langTag")
                 withContext(Dispatchers.Main) {
-                    _uiState.update { it.copy(currentTranscript = "").clearStatus() }
+                    _uiState.update { it.copy(channelState = RadioChannelState.STANDBY).clearStatus() }
                     _modelWarningMessage.value =
-                        "Neural STT pack is not downloaded. Use 🗣️ DICTATE to speak using Google Voice Input, or select Quick Phrases."
+                        "⚠️ Live voice delivered. Download the ${selectedLang.englishName} Neural STT pack in Settings for live text transcription."
                 }
                 return@launch
             }

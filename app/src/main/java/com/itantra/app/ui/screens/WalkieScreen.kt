@@ -1,14 +1,6 @@
 package com.itantra.app.ui.screens
 
-import com.itantra.app.model.TransportProtocol
-import com.itantra.app.ui.components.BatteryIndicator
-import android.app.Activity
-import android.content.Intent
-import android.speech.RecognizerIntent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -24,6 +16,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -35,9 +28,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,33 +43,36 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CallEnd
-import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.RecordVoiceOver
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Sensors
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -83,40 +82,43 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.itantra.app.model.PeerDevice
 import com.itantra.app.model.RadioChannelState
+import com.itantra.app.model.SupportedLanguage
+import com.itantra.app.model.TransportProtocol
+import com.itantra.app.ui.components.BatteryIndicator
 import com.itantra.app.ui.theme.AccentBlue
 import com.itantra.app.ui.theme.AccentBlueContainer
 import com.itantra.app.ui.theme.BadgeMintContainer
 import com.itantra.app.ui.theme.BadgeMintText
-import com.itantra.app.ui.theme.LightOutline
 import com.itantra.app.ui.theme.MeshGreen
 import com.itantra.app.ui.theme.MeshGreenContainer
 import com.itantra.app.ui.theme.MeshGreenText
-import com.itantra.app.ui.theme.MinimalColorsInstance
 import com.itantra.app.ui.theme.SosRed
-import com.itantra.app.ui.theme.SosRedContainer
 import com.itantra.app.ui.theme.SosRedDark
 import com.itantra.app.ui.theme.minimalColors
 import com.itantra.app.viewmodel.MissionControlViewModel
 
 /**
  * World-Class Modern, Minimalistic Walkie-Talkie Screen:
- * - High-End Mission Telemetry Header matching the SOS page
- * - Standby Mode: Prominent, highlighted hero transceiver dome with channel selection & clean layout
+ * - High-End Mission Telemetry Header matching the SOS / Rescue pages
+ * - Language Selector Card with 1-Tap Dialect Chips and Full Dialect Sheet
+ * - Warning & Language Mismatch Banner with 1-Tap Peer Sync
+ * - Standby Mode: Prominent, highlighted hero transceiver dome
  * - Active Mode: Transforms into a high-end call & intercom console with:
- *     - Mic Mute / Unmute button with visual badge
- *     - PTT / Voice Transmit Trigger with live equalizer audio spectrum
- *     - Speakerphone / Audio output toggle
- *     - Call-Like Red "End / Disconnect" button (replaces basic toggle)
+ *     - Interactive Central Disc: Push-to-Talk (PTT hold) + Auto-Voice VAD
+ *     - Live Equalizer audio spectrum visualizer
+ *     - Clean 3-Button Controls: Mic Mute, Speakerphone, Disconnect (Dictate removed)
  * - Revealed Controls on Activation:
  *     - Paired Team Radios with signal, battery & unpair
  *     - Available Nearby Nodes with interactive, animated Refresh/Rescan button
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WalkieScreen(
     viewModel: MissionControlViewModel,
@@ -126,6 +128,7 @@ fun WalkieScreen(
     val isWalkieActive by viewModel.isWalkieActive.collectAsState()
     val isMicMuted by viewModel.isMicMuted.collectAsState()
     val isTransmitting by viewModel.isTransmitting.collectAsState()
+    val isPttActive by viewModel.isPttActive.collectAsState()
     val isRefreshingNodes by viewModel.isRefreshingNodes.collectAsState()
     val isSpeakerphoneOn by viewModel.isSpeakerphoneOn.collectAsState()
     val pairedDevices by viewModel.pairedWalkieDevices.collectAsState()
@@ -141,19 +144,13 @@ fun WalkieScreen(
     val connectedPairedCount = pairedDevices.count { it.isConnected }
     val uiState by viewModel.uiState.collectAsState()
     val messageLogs by viewModel.messageLogs.collectAsState()
+    val modelPacks by viewModel.modelPacks.collectAsState()
+    val modelWarningMessage by viewModel.modelWarningMessage.collectAsState()
+    val activePeerLanguage by viewModel.activePeerLanguage.collectAsState()
 
-    val speechLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spokenText = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!spokenText.isNullOrBlank()) {
-                viewModel.sendBroadcastTextMessage(spokenText)
-            }
-        }
-    }
+    var showLanguageSheet by remember { mutableStateOf(false) }
+    var languageSearchQuery by remember { mutableStateOf("") }
+    val selectedLanguage = uiState.selectedLanguage
 
     val scrollState = rememberScrollState()
 
@@ -228,13 +225,13 @@ fun WalkieScreen(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Box(
                         modifier = Modifier
                             .size(7.dp)
                             .clip(CircleShape)
-                            .background(if (isWalkieActive) MeshGreen else AccentBlue)
+                            .background(colors.accent)
                     )
                     Text(
                         text = "iTANTRA",
@@ -396,7 +393,234 @@ fun WalkieScreen(
         }
 
         // =======================================================
-        // 2. STANDBY HERO (When Walkie is Inactive)
+        // WARNING / STATUS BANNER (Language Mismatch, Model Packs)
+        // =======================================================
+        AnimatedVisibility(
+            visible = modelWarningMessage != null,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            val warning = modelWarningMessage
+            if (warning != null) {
+                val isMismatch = warning.contains("Language Mismatch", ignoreCase = true)
+                val peerLangCode = activePeerLanguage
+                val peerLangName = peerLangCode?.let { SupportedLanguage.fromCode(it).englishName }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (isMismatch) Color(0xFFFEF3C7) else Color(0xFFEFF6FF))
+                        .border(
+                            width = 1.dp,
+                            color = if (isMismatch) Color(0xFFF59E0B) else Color(0xFF3B82F6),
+                            shape = RoundedCornerShape(16.dp)
+                        )
+                        .padding(14.dp)
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = if (isMismatch) Color(0xFFB45309) else Color(0xFF1D4ED8),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = if (isMismatch) "LANGUAGE MISMATCH" else "RADIO NOTICE",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.8.sp,
+                                color = if (isMismatch) Color(0xFFB45309) else Color(0xFF1D4ED8)
+                            )
+                        }
+
+                        Text(
+                            text = warning,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (isMismatch) Color(0xFF78350F) else Color(0xFF1E3A8A)
+                        )
+
+                        // If it's a language mismatch, provide a 1-tap button to sync language with the peer!
+                        if (isMismatch && peerLangCode != null && peerLangName != null) {
+                            Button(
+                                onClick = {
+                                    viewModel.setSelectedLanguage(SupportedLanguage.fromCode(peerLangCode))
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFD97706),
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Text(
+                                    text = "Switch to $peerLangName ($peerLangCode) to Match Peer",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // =======================================================
+        // 2. LANGUAGE SELECTOR CARD
+        // =======================================================
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .shadow(elevation = 2.dp, shape = RoundedCornerShape(20.dp), spotColor = Color(0x0A000000))
+                .clip(RoundedCornerShape(20.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.outline, RoundedCornerShape(20.dp))
+                .padding(14.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(colors.accent.copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = selectedLanguage.nativeInitial,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.accent
+                            )
+                        }
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "RADIO DIALECT: ",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.6.sp,
+                                    color = colors.textSecondary
+                                )
+                                Text(
+                                    text = "${selectedLanguage.englishName} (${selectedLanguage.code.uppercase()})",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                            }
+                            val isInstalled = modelPacks.firstOrNull {
+                                it.iso == selectedLanguage.code || it.languageTag.startsWith(selectedLanguage.code)
+                            }?.isInstalled == true
+                            Text(
+                                text = if (isInstalled) "✓ Neural Pack Ready" else "⚠ Pack Not Installed (${selectedLanguage.downloadSizeMb} MB)",
+                                fontSize = 11.sp,
+                                fontWeight = if (isInstalled) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isInstalled) Color(0xFF059669) else Color(0xFFD97706)
+                            )
+                        }
+                    }
+
+                    Surface(
+                        onClick = { showLanguageSheet = true },
+                        shape = RoundedCornerShape(8.dp),
+                        color = colors.cardSecondaryBg,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, colors.outline)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "SWITCH",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.accent
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Icon(
+                                imageVector = Icons.Default.ExpandMore,
+                                contentDescription = "Switch Language",
+                                tint = colors.accent,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = colors.outline.copy(alpha = 0.5f), thickness = 1.dp)
+
+                // 1-Tap Dialect Chips: Hindi, English, Bengali, Marathi
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val quickLangs = listOf(
+                        SupportedLanguage.HINDI,
+                        SupportedLanguage.ENGLISH,
+                        SupportedLanguage.BENGALI,
+                        SupportedLanguage.MARATHI
+                    )
+
+                    quickLangs.forEach { lang ->
+                        val isLangActive = selectedLanguage == lang
+                        val isInstalled = modelPacks.firstOrNull {
+                            it.iso == lang.code || it.languageTag.startsWith(lang.code)
+                        }?.isInstalled == true
+
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isLangActive) colors.accent else colors.cardSecondaryBg)
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isLangActive) colors.accent else colors.outline,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .clickable { viewModel.setSelectedLanguage(lang) }
+                                .padding(vertical = 7.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = lang.englishName,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isLangActive) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isLangActive) Color.White else colors.textPrimary
+                                )
+                                if (isInstalled) {
+                                    Text(
+                                        text = "READY",
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isLangActive) Color(0xFFA7F3D0) else Color(0xFF059669)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // =======================================================
+        // 3. STANDBY HERO (When Walkie is Inactive)
         // =======================================================
         if (!isWalkieActive) {
             Box(
@@ -478,98 +702,36 @@ fun WalkieScreen(
                                     imageVector = Icons.Default.Radio,
                                     contentDescription = null,
                                     tint = Color.White.copy(alpha = 0.95f),
-                                    modifier = Modifier.size(13.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "TRANSCEIVER",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.6.sp,
-                                    color = Color.White.copy(alpha = 0.95f)
+                                    modifier = Modifier.size(34.dp)
                                 )
                             }
-
-                            Spacer(modifier = Modifier.height(2.dp))
-
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "WALKIE",
-                                fontSize = 38.sp,
+                                text = "JOIN WALKIE",
+                                fontSize = 16.sp,
                                 fontWeight = FontWeight.Black,
-                                letterSpacing = (-0.5).sp,
+                                letterSpacing = 1.1.sp,
                                 color = Color.White
                             )
-
-                            Spacer(modifier = Modifier.height(4.dp))
-
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.White.copy(alpha = 0.22f))
-                                    .padding(horizontal = 10.dp, vertical = 3.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Sensors,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(11.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "TAP TO ACTIVATE",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        letterSpacing = 0.6.sp,
-                                        color = Color.White
-                                    )
-                                }
-                            }
+                            Text(
+                                text = "OFF-GRID TEAM VOICE",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.8.sp,
+                                color = Color.White.copy(alpha = 0.8f)
+                            )
                         }
                     }
                 }
             }
 
-            // Reassurance & Instructions Card
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(colors.cardSecondaryBg)
-                    .padding(horizontal = 14.dp, vertical = 9.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Security,
-                        contentDescription = null,
-                        tint = colors.accent,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Tap to join off-grid team mesh • Automatically reconnects to remembered radios in range",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = colors.textSecondary,
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
-
-            // Quick Capabilities Row (Human-friendly, zero jargon)
+            // Trust Badges underneath the standby hero
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                listOf("100% Offline", "No Internet Needed", "Hands-Free Auto Voice").forEach { feature ->
+                listOf("100% Offline", "Direct Mesh Voice", "Zero Mobile Data").forEach { feature ->
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
@@ -588,7 +750,7 @@ fun WalkieScreen(
         }
 
         // =======================================================
-        // 3. ACTIVE MODE: CALL-STYLE CONSOLE & CONTROLS
+        // 4. ACTIVE MODE: CALL-STYLE CONSOLE & CONTROLS
         // =======================================================
         if (isWalkieActive) {
             // Hero Voice Comms Stage Card
@@ -605,7 +767,7 @@ fun WalkieScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    // Top Room Info Row (No technical jargon like 5.180 GHz or AES-256)
+                    // Top Room Info Row
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -649,8 +811,8 @@ fun WalkieScreen(
                         }
                     }
 
-                    // Voice Equalizer / PTT Central Disc
-                    val isLiveTx = (isTransmitting || isVadSpeaking) && !isMicMuted
+                    // Voice Equalizer / PTT Central Disc (Supports HOLD TO TALK via pointerInput)
+                    val isLiveTx = (isTransmitting || isVadSpeaking || isPttActive) && !isMicMuted
                     Box(
                         modifier = Modifier
                             .size(136.dp)
@@ -672,7 +834,7 @@ fun WalkieScreen(
                             )
                         }
 
-                        // Central Disc
+                        // Central Disc: Push-to-Talk touch gesture handler
                         Box(
                             modifier = Modifier
                                 .size(108.dp)
@@ -695,7 +857,19 @@ fun WalkieScreen(
                                         else -> Color.White
                                     },
                                     shape = CircleShape
-                                ),
+                                )
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                        onPress = {
+                                            viewModel.startPtt()
+                                            try {
+                                                tryAwaitRelease()
+                                            } finally {
+                                                viewModel.stopPtt()
+                                            }
+                                        }
+                                    )
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -705,7 +879,7 @@ fun WalkieScreen(
                                     isReceivingAudio -> Icons.AutoMirrored.Filled.VolumeUp
                                     else -> Icons.Default.Mic
                                 },
-                                contentDescription = null,
+                                contentDescription = "Push to Talk",
                                 tint = if (isMicMuted) SosRedDark else Color.White,
                                 modifier = Modifier.size(44.dp)
                             )
@@ -730,8 +904,8 @@ fun WalkieScreen(
                             text = when {
                                 isMicMuted -> "MIC MUTED • TAP UNMUTE TO SPEAK"
                                 isReceivingAudio -> "RECEIVING LIVE VOICE..."
-                                isLiveTx -> "TRANSMITTING LIVE VOICE + TEXT"
-                                else -> "AUTO-VOICE ACTIVE • SPEAK FREELY"
+                                isLiveTx -> if (isPttActive) "TRANSMITTING LIVE VOICE (PTT HELD)" else "TRANSMITTING LIVE VOICE..."
+                                else -> "HOLD DISC TO TALK • OR SPEAK FREELY"
                             },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -744,10 +918,7 @@ fun WalkieScreen(
                         )
                     }
 
-                    // Live 24-Bar Equalizer Audio Spectrum Visualizer.
-                    // Bar heights are driven purely by the measured audio level
-                    // (mic while transmitting, received frame RMS while a peer
-                    // speaks) — there is no decorative animation.
+                    // Live 24-Bar Equalizer Audio Spectrum Visualizer
                     Row(
                         modifier = Modifier
                             .fillMaxWidth(0.92f)
@@ -784,18 +955,18 @@ fun WalkieScreen(
                     HorizontalDivider(color = colors.outline, thickness = 1.dp)
 
                     // =======================================================
-                    // CLEAN HANDS-FREE CALL CONTROLS
+                    // CLEAN 3-BUTTON HANDS-FREE CONTROLS
                     // (1. Mute/Unmute Mic, 2. Speaker/Earpiece, 3. Disconnect)
-                    // Voice is automatically detected by VAD and sent as text!
+                    // Note: Dictate button removed as requested.
                     // =======================================================
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp),
+                            .padding(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // 1. Mic Mute / Unmute Button (Primary control for hands-free VAD)
+                        // 1. Mic Mute / Unmute Button
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -838,7 +1009,7 @@ fun WalkieScreen(
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(
-                                        imageVector = if (isSpeakerphoneOn) Icons.Default.VolumeUp else Icons.Default.Hearing,
+                                        imageVector = if (isSpeakerphoneOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.Default.Hearing,
                                         contentDescription = "Speaker",
                                         tint = if (isSpeakerphoneOn) colors.accent else colors.textPrimary,
                                         modifier = Modifier.size(26.dp)
@@ -853,46 +1024,7 @@ fun WalkieScreen(
                             )
                         }
 
-                        // 3. Google Voice Dictate Button
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Surface(
-                                onClick = {
-                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, uiState.selectedLanguage.languageTag)
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, uiState.selectedLanguage.languageTag)
-                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in ${uiState.selectedLanguage.nativeName}...")
-                                    }
-                                    try {
-                                        speechLauncher.launch(intent)
-                                    } catch (_: Exception) {}
-                                },
-                                shape = CircleShape,
-                                color = colors.badgeMintContainer,
-                                shadowElevation = 3.dp,
-                                modifier = Modifier.size(58.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Default.RecordVoiceOver,
-                                        contentDescription = "Dictate Speech",
-                                        tint = Color(0xFF059669),
-                                        modifier = Modifier.size(26.dp)
-                                    )
-                                }
-                            }
-                            Text(
-                                text = "Dictate",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = colors.textSecondary
-                            )
-                        }
-
-                        // 4. Call-Like Red "End / Disconnect" Button
+                        // 3. Call-Like Red "End / Disconnect" Button
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -968,13 +1100,13 @@ fun WalkieScreen(
                             ) {
                                 Text(
                                     text = if (uiState.channelState == RadioChannelState.RECEIVING) "⚡ RECEIVING VOICE"
-                                           else if (isTransmitting || isVadSpeaking) "🎙️ TRANSMITTING"
-                                           else "● STANDBY",
+                                    else if (isTransmitting || isVadSpeaking || isPttActive) "🎙️ TRANSMITTING"
+                                    else "● STANDBY",
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (uiState.channelState == RadioChannelState.RECEIVING) MeshGreenText
-                                           else if (isTransmitting || isVadSpeaking) AccentBlue
-                                           else colors.textSecondary
+                                    else if (isTransmitting || isVadSpeaking || isPttActive) AccentBlue
+                                    else colors.textSecondary
                                 )
                             }
                         }
@@ -1003,7 +1135,7 @@ fun WalkieScreen(
                                 .border(
                                     width = 1.dp,
                                     color = if (uiState.channelState == RadioChannelState.RECEIVING) MeshGreen.copy(alpha = 0.5f)
-                                           else colors.outline,
+                                    else colors.outline,
                                     shape = RoundedCornerShape(12.dp)
                                 )
                                 .padding(12.dp)
@@ -1033,7 +1165,7 @@ fun WalkieScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "Speak or hold PTT to transmit. Transcriptions sync across all radios automatically.",
+                                text = "Hold central disc or speak to transmit. Transcriptions sync across all radios automatically.",
                                 fontSize = 11.sp,
                                 color = colors.textSecondary,
                                 textAlign = TextAlign.Center
@@ -1076,7 +1208,7 @@ fun WalkieScreen(
             }
 
             // =======================================================
-            // 4. PAIRED TEAM RADIOS (Revealed on Activation)
+            // 5. PAIRED TEAM RADIOS (Revealed on Activation)
             // =======================================================
             Box(
                 modifier = Modifier
@@ -1206,7 +1338,7 @@ fun WalkieScreen(
             }
 
             // =======================================================
-            // 5. AVAILABLE NODES NEARBY (With Refresh Button)
+            // 6. AVAILABLE NODES NEARBY (With Refresh Button)
             // =======================================================
             Box(
                 modifier = Modifier
@@ -1336,5 +1468,114 @@ fun WalkieScreen(
         }
 
         Spacer(modifier = Modifier.height(14.dp))
+    }
+
+    // =======================================================
+    // FULL DIALECT SELECTION BOTTOM SHEET
+    // =======================================================
+    if (showLanguageSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showLanguageSheet = false },
+            sheetState = sheetState,
+            containerColor = colors.surface,
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Select Walkie Dialect",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary
+                    )
+                    IconButton(onClick = { showLanguageSheet = false }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textSecondary)
+                    }
+                }
+
+                OutlinedTextField(
+                    value = languageSearchQuery,
+                    onValueChange = { languageSearchQuery = it },
+                    placeholder = { Text("Search language or dialect...", fontSize = 13.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                val filtered = remember(languageSearchQuery) {
+                    if (languageSearchQuery.isBlank()) SupportedLanguage.entries
+                    else {
+                        val q = languageSearchQuery.trim().lowercase()
+                        SupportedLanguage.entries.filter {
+                            it.englishName.lowercase().contains(q) ||
+                            it.nativeName.lowercase().contains(q) ||
+                            it.code.lowercase().contains(q)
+                        }
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 380.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filtered) { lang ->
+                        val isSelected = selectedLanguage == lang
+                        val isInstalled = modelPacks.firstOrNull {
+                            it.iso == lang.code || it.languageTag.startsWith(lang.code)
+                        }?.isInstalled == true
+
+                        Surface(
+                            onClick = {
+                                viewModel.setSelectedLanguage(lang)
+                                showLanguageSheet = false
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSelected) colors.accent.copy(alpha = 0.12f) else colors.cardSecondaryBg,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (isSelected) colors.accent else colors.outline
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(14.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        text = "${lang.englishName} (${lang.nativeName})",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = if (isSelected) colors.accent else colors.textPrimary
+                                    )
+                                    Text(
+                                        text = if (isInstalled) "✓ Installed & Ready" else "Neural Pack: ${lang.downloadSizeMb} MB",
+                                        fontSize = 11.sp,
+                                        color = if (isInstalled) Color(0xFF059669) else colors.textSecondary
+                                    )
+                                }
+                                if (isSelected) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = colors.accent)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
