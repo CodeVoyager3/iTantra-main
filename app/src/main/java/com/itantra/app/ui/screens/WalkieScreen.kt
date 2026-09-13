@@ -1,5 +1,6 @@
 package com.itantra.app.ui.screens
 
+import com.itantra.app.model.TransportProtocol
 import com.itantra.app.ui.components.BatteryIndicator
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -123,6 +124,11 @@ fun WalkieScreen(
     val discoveredDevices by viewModel.discoveredWalkieDevices.collectAsState()
     val isVadSpeaking by viewModel.isVadSpeaking.collectAsState()
     val audioLevel by viewModel.audioLevel.collectAsState()
+    val isWalkieLinkActive by viewModel.isWalkieLinkActive.collectAsState()
+    val isReceivingAudio by viewModel.isReceivingAudio.collectAsState()
+    val remoteAudioLevel by viewModel.remoteAudioLevel.collectAsState()
+    val liveAudioLevel = if (isReceivingAudio) remoteAudioLevel else audioLevel
+    val connectedPairedCount = pairedDevices.count { it.isConnected }
     val uiState by viewModel.uiState.collectAsState()
     val messageLogs by viewModel.messageLogs.collectAsState()
 

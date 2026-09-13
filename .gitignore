@@ -1,4 +1,4 @@
-﻿# =============================
+# =============================
 # Android / Gradle Build Output
 # =============================
 *.iml
@@ -60,6 +60,7 @@ Makefile
 # =============================
 *.jks
 *.keystore
+!app/debug.keystore
 keystore.properties
 release.properties
 

@@ -68,6 +68,8 @@ import com.itantra.app.service.TacticalMeshService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -529,6 +531,19 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private val _discoveredWalkieDevices = MutableStateFlow<List<PeerDevice>>(emptyList())
     val discoveredWalkieDevices: StateFlow<List<PeerDevice>> = _discoveredWalkieDevices.asStateFlow()
 
+    private val _isWalkieLinkActive = MutableStateFlow(false)
+    val isWalkieLinkActive: StateFlow<Boolean> = _isWalkieLinkActive.asStateFlow()
+
+    private val _remoteAudioLevel = MutableStateFlow(0f)
+    val remoteAudioLevel: StateFlow<Float> = _remoteAudioLevel.asStateFlow()
+
+    private val _isReceivingAudio = MutableStateFlow(false)
+    val isReceivingAudio: StateFlow<Boolean> = _isReceivingAudio.asStateFlow()
+
+    private var lastPeerContactEpochMs = 0L
+    private var lastRemoteAudioFrameEpochMs = 0L
+    private var remoteAudioDecayJob: Job? = null
+
     private val _isVadSpeaking = MutableStateFlow(false)
     val isVadSpeaking: StateFlow<Boolean> = _isVadSpeaking.asStateFlow()
 
@@ -541,31 +556,11 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private val _vadStatus = MutableStateFlow(VadStatus.SILENCE)
     val vadStatus: StateFlow<VadStatus> = _vadStatus.asStateFlow()
 
-    private fun buildWalkieBeaconPayload(): DistressBeaconPayload = DistressBeaconPayload(
-        nodeId = _nodeId.value,
-        batteryPercent = currentBatteryPercent(),
-        latitudeDeg = _rescuerLat.value,
-        longitudeDeg = _rescuerLon.value,
-        altitudeMeters = _activeWalkieChannel.value,
-        languageIso = _uiState.value.selectedLanguage.code,
-        isDistress = false
-    )
-
-    private fun startWalkieBeaconAdvertising() {
-        bleMeshManager?.startAdvertising(buildWalkieBeaconPayload(), BeaconTxPower.HIGH)
-    }
-
-    private fun stopWalkieBeaconAdvertising() {
-        if (!_isSosBroadcasting.value && !_isRescueActive.value) {
-            bleMeshManager?.stopAdvertising()
-        }
-    }
-
     fun toggleWalkieMaster(active: Boolean) {
         _isWalkieActive.value = active
         if (active) {
             startMeshVoiceCapture()
-            startWalkieBeaconAdvertising()
+            syncBeaconAdvertising()
             wifiDirectMeshManager?.startDiscovery()
             wifiDirectMeshManager?.startUdpBroadcast()
             bleMeshManager?.startScanning() // BLE peers also appear as walkie nodes
@@ -578,7 +573,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 "mesh ON: presence beacon + scan + UDP on ${WifiDirectMeshManager.UDP_PORT} (nodeId=${_nodeId.value})"
             )
         } else {
-            stopWalkieBeaconAdvertising()
             wifiDirectMeshManager?.stopDiscovery()
             syncVoiceCaptureState()
             stopMeshUdpIfIdle()
@@ -759,7 +753,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     )
                 )
             )
-            stopRescuerBeaconAdvertising()
             stopBleScanIfIdle()
             _connectedVictimIntercom.value = null
             _isBroadcastingToAll.value = false
@@ -1699,6 +1692,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 wifiDirectMeshManager?.broadcastDatagram(encodedVoice)
 
                 // 2. Accumulate utterance for neural transcription
+                val currentSize: Int
                 synchronized(voiceTurnBuffer ?: this) {
                     voiceTurnBuffer?.write(frame, 0, frame.size)
                     currentSize = voiceTurnBuffer?.size() ?: 0
@@ -2065,13 +2059,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private fun recreateAudioWithTts(text: String, langCode: String) {
         ttsPlaybackJob?.cancel()
         ttsPlaybackJob = viewModelScope.launch(Dispatchers.Default) {
-            // 1. Google Speech Services / System TTS provides crystal-clear neural voice across all Android versions
-            if (isSystemTtsReady) {
-                withContext(Dispatchers.Main) {
-                    speakWithSystemTts(text, langCode)
-                }
-                return@launch
-            }
+            val onnx = onnxInferenceManager
+            var playedOnnx = false
 
             // Direct on-disk gate (never the installedPacks flow): the flow
             // starts empty and is only filled by an async rescan, so a packet
