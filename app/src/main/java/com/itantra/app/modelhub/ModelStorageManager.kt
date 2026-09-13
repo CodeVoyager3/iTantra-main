@@ -50,9 +50,10 @@ class ModelStorageManager(context: Context) {
 
     fun isInstalled(languageTag: String): Boolean {
         val keys = _installedPacks.value.keys
-        return keys.contains(languageTag) || keys.any {
+        if (keys.contains(languageTag) || keys.any {
             it.startsWith("$languageTag-", ignoreCase = true) || it.equals(languageTag, ignoreCase = true)
-        }
+        }) return true
+        return isInstalledOnDisk(languageTag)
     }
 
     /**

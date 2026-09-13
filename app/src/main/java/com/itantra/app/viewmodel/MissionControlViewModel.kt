@@ -1396,17 +1396,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 logVoice("decode", "text from ${nodeCallsign(packet.nodeId)} (lang=$langCode): '$text'")
 
                 if (text.isNotBlank()) {
-                    // Only play voice and enter RECEIVING state if our local mode allows it
-                    if (!shouldPlayIncomingVoiceText(packet.nodeId)) {
-                        logVoice(
-                            "rx",
-                            "ignored voice text from ${nodeCallsign(packet.nodeId)}: local state not in active call/broadcast " +
-                                "(walkie=${_isWalkieActive.value}, rescuerCall=${_connectedVictimIntercom.value?.nodeId}, " +
-                                "victimCall=${_connectedRescuer.value?.id}, broadcast=${_isReceivingOneWayBroadcast.value})"
-                        )
-                        return
-                    }
-
+                    // 1. ALWAYS record in UI transcript and message log so emergency messages are never lost
                     viewModelScope.launch(Dispatchers.Main) {
                         _uiState.update {
                             it.copy(
@@ -1433,18 +1423,28 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                         "transcript + log updated from ${nodeCallsign(packet.nodeId)} (channelState=RECEIVING)"
                     )
 
-                    // Re-create audio locally on receiver using TTS! Legacy
-                    // senders can still emit sub-word STT noise (a stray 'क')
-                    // — store it above but never speak it. Deliberate
-                    // quick-chip/dictation texts are real words and pass.
-                    if (text.count { it.isLetterOrDigit() } >= 2) {
-                        recreateAudioWithTts(text, langCode)
+                    // 2. Synthesize audio via TTS ONLY if local state authorizes voice playback
+                    if (shouldPlayIncomingVoiceText(packet.nodeId)) {
+                        if (text.count { it.isLetterOrDigit() } >= 2) {
+                            recreateAudioWithTts(text, langCode)
+                        } else {
+                            Log.d("MissionControl", "TRANSLATED_TEXT: skipping TTS for noise text '$text' from ${nodeCallsign(packet.nodeId)}")
+                        }
                     } else {
-                        Log.d("MissionControl", "TRANSLATED_TEXT: skipping TTS for noise text '$text' from ${nodeCallsign(packet.nodeId)}")
+                        logVoice(
+                            "rx",
+                            "speech muted for text from ${nodeCallsign(packet.nodeId)}: local state not in active call/broadcast " +
+                                "(walkie=${_isWalkieActive.value}, rescuerCall=${_connectedVictimIntercom.value?.nodeId}, " +
+                                "victimCall=${_connectedRescuer.value?.id}, broadcast=${_isReceivingOneWayBroadcast.value})"
+                        )
                     }
                 }
             }
             PacketFraming.MSG_TYPE_VOICE_FRAME -> {
+                // Strictly gate raw audio frames: only play if authorized by local mode
+                if (!shouldPlayIncomingVoiceText(packet.nodeId)) {
+                    return
+                }
                 refreshRescuerContact(packet.nodeId)
                 val decoded = VoiceFrame.decode(packet.payload)
                 val pcm = decoded?.pcm ?: packet.payload
@@ -1680,18 +1680,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             // Echo guard (defense in depth — the engine also gates): never
             // retransmit or transcribe audio captured during self-playback.
             if (!_isMicMuted.value && (_isVadSpeaking.value || _isPttActive.value) && !isEchoGuardActive()) {
-                // 1. Live audio streaming over high-speed UDP mesh
-                val voicePayload = VoiceFrame.encode(voiceFrameSequence++, frame)
-                val voicePacket = ItantraPacket(
-                    nodeId = _nodeId.value,
-                    ttl = 2,
-                    msgType = PacketFraming.MSG_TYPE_VOICE_FRAME,
-                    payload = voicePayload
-                )
-                val encodedVoice = PacketFraming.encode(voicePacket)
-                wifiDirectMeshManager?.broadcastDatagram(encodedVoice)
-
-                // 2. Accumulate utterance for neural transcription
+                // Low-bitrate text mesh: speech frames accumulate locally for on-device STT.
                 val currentSize: Int
                 synchronized(voiceTurnBuffer ?: this) {
                     voiceTurnBuffer?.write(frame, 0, frame.size)
@@ -1923,9 +1912,11 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             var transcribedText = ""
             val onnx = onnxInferenceManager
 
-            // Check model installation using both short code and full tag
+            // Check model installation using short code and full tag, in memory and on disk
             val isInstalled = modelStorageManager.isInstalled(langCode) ||
-                modelStorageManager.isInstalled(langTag)
+                modelStorageManager.isInstalled(langTag) ||
+                modelStorageManager.isInstalledOnDisk(langCode) ||
+                modelStorageManager.isInstalledOnDisk(langTag)
 
             if (isInstalled && onnx != null) {
                 try {
@@ -1947,7 +1938,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 withContext(Dispatchers.Main) {
                     _uiState.update { it.copy(currentTranscript = "").clearStatus() }
                     _modelWarningMessage.value =
-                        "Neural STT pack for ${selectedLang.englishName} is NOT downloaded. Use 🗣️ DICTATE or Quick Phrases below, or download pack in Settings → Models."
+                        "Neural STT pack is not downloaded. Use 🗣️ DICTATE to speak using Google Voice Input, or select Quick Phrases."
                 }
                 return@launch
             }

@@ -2,6 +2,11 @@ package com.itantra.app.ui.screens
 
 import com.itantra.app.model.TransportProtocol
 import com.itantra.app.ui.components.BatteryIndicator
+import android.app.Activity
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -49,6 +54,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.VolumeUp
@@ -131,6 +137,19 @@ fun WalkieScreen(
     val connectedPairedCount = pairedDevices.count { it.isConnected }
     val uiState by viewModel.uiState.collectAsState()
     val messageLogs by viewModel.messageLogs.collectAsState()
+
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spokenText = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!spokenText.isNullOrBlank()) {
+                viewModel.sendBroadcastTextMessage(spokenText)
+            }
+        }
+    }
 
     val scrollState = rememberScrollState()
 
@@ -729,7 +748,46 @@ fun WalkieScreen(
                             )
                         }
 
-                        // 3. Call-Like Red "End / Disconnect" Button
+                        // 3. Google Voice Dictate Button
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Surface(
+                                onClick = {
+                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, uiState.selectedLanguage.languageTag)
+                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, uiState.selectedLanguage.languageTag)
+                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in ${uiState.selectedLanguage.nativeName}...")
+                                    }
+                                    try {
+                                        speechLauncher.launch(intent)
+                                    } catch (_: Exception) {}
+                                },
+                                shape = CircleShape,
+                                color = colors.badgeMintContainer,
+                                shadowElevation = 3.dp,
+                                modifier = Modifier.size(58.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.RecordVoiceOver,
+                                        contentDescription = "Dictate Speech",
+                                        tint = Color(0xFF059669),
+                                        modifier = Modifier.size(26.dp)
+                                    )
+                                }
+                            }
+                            Text(
+                                text = "Dictate",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.textSecondary
+                            )
+                        }
+
+                        // 4. Call-Like Red "End / Disconnect" Button
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(4.dp)
