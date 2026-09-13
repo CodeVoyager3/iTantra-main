@@ -1238,11 +1238,20 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 lastRescuerContactEpochMs = System.currentTimeMillis()
                 syncVoiceCaptureState()
             } else if (_connectedRescuer.value != null) {
-                // If neither BLE beacon nor recent UDP contact in the last 15 seconds, mark disconnected
-                if (System.currentTimeMillis() - lastRescuerContactEpochMs > 15000L) {
+                // If rescuer beacon is seen but explicitly IDLE or targeting another node, drop immediately
+                val connectedRescuerBeacon = rescuerBeacons.firstOrNull { "resc-${it.nodeId}" == connectedRescuerId }
+                val isExplicitlyNotCallingUs = connectedRescuerBeacon != null &&
+                    connectedRescuerBeacon.altitudeMeters != -1 &&
+                    connectedRescuerBeacon.altitudeMeters != myTargetMask
+
+                if (isExplicitlyNotCallingUs || System.currentTimeMillis() - lastRescuerContactEpochMs > 8000L) {
                     _connectedRescuer.value = null
                     _isReceivingOneWayBroadcast.value = false
                     syncVoiceCaptureState()
+                }
+            } else {
+                if (_isReceivingOneWayBroadcast.value && callingBeacons.isEmpty()) {
+                    _isReceivingOneWayBroadcast.value = false
                 }
             }
         }
@@ -1486,8 +1495,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             }
             PacketFraming.MSG_TYPE_VOICE_LINK_REQUEST -> {
                 // A rescuer is opening an intercom toward this device (we are
-                // the victim). Mark them connected!
+                // the victim). Mark them connected and exit broadcast mode!
                 if (_isSosBroadcasting.value) {
+                    _isReceivingOneWayBroadcast.value = false
                     refreshRescuerContact(packet.nodeId)
                     val rescuerId = "resc-${packet.nodeId}"
                     val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
@@ -1530,7 +1540,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 // another victim must never clear our connection — and only
                 // the connected rescuer can drop us at all.
                 val senderIsConnected = _connectedRescuer.value?.id == "resc-${packet.nodeId}"
-                val closeTargetsUs = if (packet.payload.isEmpty()) {
+                val isBroadcastClose = packet.payload.isEmpty()
+                val closeTargetsUs = if (isBroadcastClose) {
                     true
                 } else {
                     val targetNodeId = try {
@@ -1540,8 +1551,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     }
                     targetNodeId == _nodeId.value
                 }
-                if (senderIsConnected && closeTargetsUs) {
+                if (isBroadcastClose || (senderIsConnected && closeTargetsUs)) {
                     _connectedRescuer.value = null
+                    _isReceivingOneWayBroadcast.value = false
                     syncVoiceCaptureState()
                 }
                 if (_connectedVictimIntercom.value?.nodeId == packet.nodeId) {
@@ -2617,6 +2629,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
      */
     fun clearSessionTranscripts() {
         _messageLogs.value = emptyList()
+        _isReceivingOneWayBroadcast.value = false
         _uiState.update {
             it.copy(
                 currentTranscript = "",

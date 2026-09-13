@@ -1119,30 +1119,28 @@ fun SosDistressScreen(
                                 ) {
                                     Surface(
                                         onClick = {
-                                            if (!isBroadcast) {
-                                                viewModel.disconnectConnectedRescuer()
-                                            }
+                                            viewModel.disconnectConnectedRescuer()
                                         },
-                                        enabled = !isBroadcast,
+                                        enabled = true,
                                         shape = CircleShape,
-                                        color = if (isBroadcast) (if (colors.isDark) Color(0xFF334155) else Color(0xFFE2E8F0)) else SosRed,
-                                        shadowElevation = if (isBroadcast) 0.dp else 4.dp,
+                                        color = if (isBroadcast) RescueAmber else SosRed,
+                                        shadowElevation = 4.dp,
                                         modifier = Modifier.size(58.dp)
                                     ) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(
-                                                imageVector = if (isBroadcast) Icons.Default.Hearing else Icons.Default.CallEnd,
-                                                contentDescription = if (isBroadcast) "Listen Only" else "Disconnect",
-                                                tint = if (isBroadcast) colors.textSecondary else Color.White,
+                                                imageVector = if (isBroadcast) Icons.Default.Close else Icons.Default.CallEnd,
+                                                contentDescription = if (isBroadcast) "Dismiss Broadcast" else "Disconnect",
+                                                tint = Color.White,
                                                 modifier = Modifier.size(26.dp)
                                             )
                                         }
                                     }
                                     Text(
-                                        text = if (isBroadcast) "Listen Only" else "End Call",
+                                        text = if (isBroadcast) "Dismiss" else "End Call",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (isBroadcast) colors.textSecondary else SosRedDark
+                                        color = if (isBroadcast) RescueAmberText else SosRedDark
                                     )
                                 }
                             }
