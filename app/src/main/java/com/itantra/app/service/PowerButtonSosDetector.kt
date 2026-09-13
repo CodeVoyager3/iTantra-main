@@ -29,8 +29,8 @@ class PowerButtonSosDetector(
 ) {
     companion object {
         private const val TAG = "PowerButtonSosDetector"
-        private const val WINDOW_MS = 5000L
-        private const val REQUIRED_CLICKS = 5
+        private const val WINDOW_MS = 3000L
+        private const val REQUIRED_CLICKS = 3
         private const val EMERGENCY_NOTIF_ID = 0x505 // 'SOS'
         private const val CHANNEL_ID = "itantra_emergency_trigger"
     }
@@ -44,14 +44,14 @@ class PowerButtonSosDetector(
             if (action == Intent.ACTION_SCREEN_ON || action == Intent.ACTION_SCREEN_OFF) {
                 val now = SystemClock.uptimeMillis()
                 synchronized(timestamps) {
-                    // Evict any clicks outside the 3.5-second rolling window
+                    // Evict any clicks outside the 3-second rolling window
                     timestamps.removeAll { now - it > WINDOW_MS }
                     timestamps.add(now)
 
                     Log.d(TAG, "Screen toggle detected ($action). Count in window: ${timestamps.size}/$REQUIRED_CLICKS")
 
                     if (timestamps.size >= REQUIRED_CLICKS) {
-                        Log.w(TAG, "⚡ 5-click Power Button sequence detected! Triggering Lockscreen SOS")
+                        Log.w(TAG, "⚡ 3-click Power Button sequence detected! Triggering Lockscreen SOS")
                         timestamps.clear()
                         launchLockscreenSos()
                         onTrigger?.invoke()
@@ -132,7 +132,7 @@ class PowerButtonSosDetector(
                     "Emergency SOS Trigger",
                     NotificationManager.IMPORTANCE_HIGH
                 ).apply {
-                    description = "Urgent lockscreen notification for 5-click emergency SOS"
+                    description = "Urgent lockscreen notification for 3-click emergency SOS"
                     setBypassDnd(true)
                     enableVibration(true)
                     lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
@@ -143,7 +143,7 @@ class PowerButtonSosDetector(
             val builder = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setContentTitle("EMERGENCY SOS ACTIVATED")
-                .setContentText("5-Click Power Button Trigger Detected")
+                .setContentText("Triple-Click Power Button Trigger Detected")
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setFullScreenIntent(fullScreenPendingIntent, true)
