@@ -89,4 +89,42 @@ class DistanceEstimatorTest {
         val west = calculateBearingDegrees(baseLat, baseLon, baseLat, baseLon - 0.1)
         assertEquals(270f, west, 1.5f)
     }
+
+    @Test
+    fun fuseGpsAndBleDistanceOverridesIndoorGpsDriftWhenClose() {
+        // User scenario: Two phones in the same room have an indoor GPS drift error of 52 meters.
+        // BLE RSSI is strong (-55 dBm), indicating ~1-2 meters.
+        val fused = fuseGpsAndBleDistance(gpsDist = 52, bleDist = 1, rssi = -55)
+        assertEquals(1, fused)
+
+        val fusedSlightlyFarther = fuseGpsAndBleDistance(gpsDist = 52, bleDist = 3, rssi = -66)
+        assertEquals(3, fusedSlightlyFarther)
+    }
+
+    @Test
+    fun fuseGpsAndBleDistanceClampsModerateIndoorDrift() {
+        // Phones separated by 8m in same floor, indoor GPS reports 60m drift
+        val fused = fuseGpsAndBleDistance(gpsDist = 60, bleDist = 5, rssi = -74)
+        assertEquals(5, fused)
+    }
+
+    @Test
+    fun fuseGpsAndBleDistancePreservesOutdoorMacroGps() {
+        // Rescuer is 150m away outside, BLE is fringe or lost (-92 dBm)
+        val fused = fuseGpsAndBleDistance(gpsDist = 150, bleDist = 25, rssi = -92)
+        assertEquals(150, fused)
+    }
+
+    @Test
+    fun smoothCompassHeadingHandlesZeroWrapCorrectly() {
+        // Wrapping clockwise across 0° (from 355° to 5°)
+        val clockwise = smoothCompassHeading(prev = 355f, target = 5f, alpha = 0.5f)
+        // Shortest diff is +10°, so 355 + 5 = 360° -> 0°
+        assertEquals(0f, clockwise, 0.5f)
+
+        // Wrapping counter-clockwise across 0° (from 5° to 355°)
+        val counterClockwise = smoothCompassHeading(prev = 5f, target = 355f, alpha = 0.5f)
+        // Shortest diff is -10°, so 5 - 5 = 0°
+        assertEquals(0f, counterClockwise, 0.5f)
+    }
 }

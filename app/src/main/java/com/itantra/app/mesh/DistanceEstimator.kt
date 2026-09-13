@@ -48,6 +48,44 @@ fun calculateBearingDegrees(lat1: Double, lon1: Double, lat2: Double, lon2: Doub
 }
 
 /**
+ * Fuses GPS great-circle distance with BLE RSSI distance estimation.
+ *
+ * Consumer smartphones indoors suffer from multipath GPS reflections and dilution
+ * of precision (typically 20m - 50m error between two devices in the same room).
+ * When BLE signals are strong (rssi >= -86 dBm), the physical 2.4 GHz radio propagation
+ * provides far superior short-range proximity information and clamps indoor GPS drift.
+ */
+fun fuseGpsAndBleDistance(gpsDist: Int, bleDist: Int, rssi: Int): Int {
+    return when {
+        // Very strong BLE: devices are in close physical proximity (same room / desk, < 4m).
+        // Indoor GPS drift of 20-60m must be completely overridden by BLE ranging.
+        rssi >= -68 -> bleDist.coerceIn(1, 4)
+
+        // Strong BLE: devices are within ~10m.
+        rssi >= -76 -> minOf(gpsDist, bleDist.coerceIn(1, 10))
+
+        // Moderate BLE: devices are within ~25m (BLE single-hop reach).
+        // Clamps indoor/reflected GPS drift to BLE estimate.
+        rssi >= -86 -> minOf(gpsDist, bleDist.coerceIn(1, 25))
+
+        // Fringe BLE or long range: trust GPS.
+        else -> gpsDist
+    }
+}
+
+/**
+ * Smooths compass heading (0..360°) using an angular low-pass filter (EMA),
+ * properly wrapping across the 0°/360° boundary to avoid 359° spin artifacts.
+ */
+fun smoothCompassHeading(prev: Float, target: Float, alpha: Float = 0.22f): Float {
+    var diff = (target - prev) % 360f
+    if (diff > 180f) diff -= 360f
+    if (diff < -180f) diff += 360f
+    val next = (prev + diff * alpha) % 360f
+    return (next + 360f) % 360f
+}
+
+/**
  * A 1-D Kalman filter for smoothing noisy RSSI readings.
  *
  * State model: the true RSSI is a slowly-wandering scalar. `processNoise` is

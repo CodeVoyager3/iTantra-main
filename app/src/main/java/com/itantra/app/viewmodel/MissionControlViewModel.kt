@@ -46,6 +46,9 @@ import com.itantra.app.mesh.ProfilePayload
 import com.itantra.app.mesh.VoiceFrame
 import com.itantra.app.mesh.WifiDirectMeshManager
 import com.itantra.app.mesh.fallbackNodeLabel
+import com.itantra.app.mesh.estimateMeters
+import com.itantra.app.mesh.fuseGpsAndBleDistance
+import com.itantra.app.mesh.smoothCompassHeading
 import com.itantra.app.model.AlertPriority
 import com.itantra.app.model.ConnectionStatus
 import com.itantra.app.model.DistressVictim
@@ -962,7 +965,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
                 SensorManager.getOrientation(rotationMatrix, orientationAngles)
                 val azimuth = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
-                _compassHeading.value = (azimuth % 360f + 360f) % 360f
+                val rawAzimuth = (azimuth % 360f + 360f) % 360f
+                _compassHeading.value = smoothCompassHeading(_compassHeading.value, rawAzimuth)
             }
             Sensor.TYPE_ACCELEROMETER -> {
                 System.arraycopy(event.values, 0, lastAccelerometer, 0, event.values.size)
@@ -985,7 +989,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             if (SensorManager.getRotationMatrix(rotationMatrix, null, lastAccelerometer, lastMagnetometer)) {
                 SensorManager.getOrientation(rotationMatrix, orientationAngles)
                 val azimuth = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
-                _compassHeading.value = (azimuth % 360f + 360f) % 360f
+                val rawAzimuth = (azimuth % 360f + 360f) % 360f
+                _compassHeading.value = smoothCompassHeading(_compassHeading.value, rawAzimuth)
             }
         }
     }
@@ -1061,11 +1066,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     Location.distanceBetween(curLat, curLon, v.latitude, v.longitude, results)
                     val gpsDist = results[0].toInt().coerceAtLeast(1)
                     val bearing = calculateBearingDegrees(curLat, curLon, v.latitude, v.longitude)
-                    val dist = if (gpsDist > 250 && v.signalDbm > -85) {
+                    val bleDist = if (v.distanceMeters in 1..30 && v.signalDbm > -86) {
                         v.distanceMeters
                     } else {
-                        gpsDist
+                        estimateMeters(v.signalDbm).roundToInt().coerceAtLeast(1)
                     }
+                    val dist = fuseGpsAndBleDistance(gpsDist, bleDist, v.signalDbm)
                     v.copy(distanceMeters = dist, relativeBearingDegrees = bearing)
                 } else {
                     v
@@ -1296,20 +1302,16 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
         val hasValidBothCoords = curLat != 0.0 && curLon != 0.0 && latitudeDeg != 0.0 && longitudeDeg != 0.0
         val results = FloatArray(1)
+        val bleDist = estimatedDistanceMeters.roundToInt().coerceAtLeast(1)
         val (finalDistance, bearing) = if (hasValidBothCoords) {
             Location.distanceBetween(curLat, curLon, latitudeDeg, longitudeDeg, results)
             val gpsDist = results[0].toInt().coerceAtLeast(1)
             val calcBearing = calculateBearingDegrees(curLat, curLon, latitudeDeg, longitudeDeg)
-            val dist = if (gpsDist > 250 && rssi > -85) {
-                estimatedDistanceMeters.roundToInt().coerceAtLeast(1)
-            } else {
-                gpsDist
-            }
+            val dist = fuseGpsAndBleDistance(gpsDist, bleDist, rssi)
             dist to calcBearing
         } else {
-            val dist = estimatedDistanceMeters.roundToInt().coerceAtLeast(1)
             val calcBearing = (((nodeId * 37L) % 360L).toFloat() + 360f) % 360f
-            dist to calcBearing
+            bleDist to calcBearing
         }
 
         val profile = peerProfiles.get(nodeId)
@@ -1335,11 +1337,21 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
     private fun DiscoveredBeacon.toRescuerNode(): RescuerNode {
         val profile = peerProfiles.get(nodeId)
+        val curLat = _rescuerLat.value
+        val curLon = _rescuerLon.value
+        val bleDist = estimatedDistanceMeters.roundToInt().coerceAtLeast(1)
+        val dist = if (curLat != 0.0 && curLon != 0.0 && latitudeDeg != 0.0 && longitudeDeg != 0.0) {
+            val results = FloatArray(1)
+            Location.distanceBetween(curLat, curLon, latitudeDeg, longitudeDeg, results)
+            fuseGpsAndBleDistance(results[0].toInt().coerceAtLeast(1), bleDist, rssi)
+        } else {
+            bleDist
+        }
         return RescuerNode(
             id = "resc-$nodeId",
             nodeId = nodeId,
             callsign = nodeCallsign(nodeId),
-            distanceMeters = estimatedDistanceMeters.roundToInt().coerceAtLeast(1),
+            distanceMeters = dist,
             signalDbm = rssi,
             role = "iTantra Rescuer",
             isConnected = _connectedRescuer.value?.id == "resc-$nodeId",

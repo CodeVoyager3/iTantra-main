@@ -2236,10 +2236,7 @@ fun MinimalBrightMapCanvas(
             // 1. Bright / Dark Minimal Cartographic Background
             drawRect(if (isDark) Color(0xFF0F172A) else Color(0xFFF8FAFC))
 
-            // 2. Subtle Cartographic Road / Street Grid Network (Rotates with compass)
-            withTransform({
-                rotate(-compassHeading, pivot = Offset(cx, cy))
-            }) {
+            // 2. Subtle Cartographic Road / Street Grid Network (North-aligned tactical grid)
             val blockSize = 55.dp.toPx() * zoomScale
             val blockColor = if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9)
             for (ix in -4..4) {
@@ -2290,7 +2287,6 @@ fun MinimalBrightMapCanvas(
                     strokeWidth = roadWidth
                 )
             }
-        }
 
         // 3. Subtle Distance Reference Rings
         val distanceSteps = listOf(0.33f to "25m", 0.66f to "50m", 1.0f to "100m")
