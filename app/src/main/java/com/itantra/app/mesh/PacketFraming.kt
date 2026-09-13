@@ -79,6 +79,20 @@ object PacketFraming {
     const val MSG_TYPE_TRANSLATION_CAPABILITY = 0x09
 
     /**
+     * Walkie-Talkie mutual pairing handshake & in-range synchronization message types:
+     * - PAIR_REQUEST: Node A asks Node B for pairing approval before any audio can be shared.
+     * - PAIR_ACCEPT: Node B approves the request; both sides persist the pairing.
+     * - PAIR_REJECT: Node B declines the pairing request.
+     * - UNPAIR: Explicit removal of pairing between nodes.
+     * - PAIR_SYNC: Periodic in-range heartbeat listing paired nodes to auto-sync removals if separated.
+     */
+    const val MSG_TYPE_PAIR_REQUEST = 0x0A
+    const val MSG_TYPE_PAIR_ACCEPT = 0x0B
+    const val MSG_TYPE_PAIR_REJECT = 0x0C
+    const val MSG_TYPE_UNPAIR = 0x0D
+    const val MSG_TYPE_PAIR_SYNC = 0x0E
+
+    /**
      * Serializes [packet] into a single byte array, appending a CRC32
      * (little-endian, as produced by [java.util.zip.CRC32]) over the header
      * and payload.

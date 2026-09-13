@@ -85,6 +85,7 @@ class SettingsRepository(context: Context) {
         val RELATIVE_RELATION = stringPreferencesKey("relative_relation")
         val RELATIVE_PHONE = stringPreferencesKey("relative_phone")
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
+        val PAIRED_WALKIE_NODE_IDS = stringSetPreferencesKey("paired_walkie_node_ids")
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -116,6 +117,12 @@ class SettingsRepository(context: Context) {
 
     val installedLanguageTags: StateFlow<Set<String>> = appContext.itantraSettingsDataStore.data
         .map { prefs -> prefs[Keys.INSTALLED_MODEL_TAGS] ?: emptySet() }
+        .stateIn(scope, SharingStarted.Eagerly, emptySet())
+
+    val pairedWalkieNodeIds: StateFlow<Set<Long>> = appContext.itantraSettingsDataStore.data
+        .map { prefs ->
+            prefs[Keys.PAIRED_WALKIE_NODE_IDS]?.mapNotNull { it.toLongOrNull() }?.toSet() ?: emptySet()
+        }
         .stateIn(scope, SharingStarted.Eagerly, emptySet())
 
     /** Sentinel meaning "no persistent mesh node id assigned yet". */
@@ -156,6 +163,26 @@ class SettingsRepository(context: Context) {
     suspend fun setRelativeRelation(value: String) = put(Keys.RELATIVE_RELATION, value)
     suspend fun setRelativePhone(value: String) = put(Keys.RELATIVE_PHONE, value)
     suspend fun setOnboardingCompleted(value: Boolean) = put(Keys.ONBOARDING_COMPLETED, value)
+
+    suspend fun addPairedWalkieNodeId(nodeId: Long) {
+        appContext.itantraSettingsDataStore.edit { prefs ->
+            val current = prefs[Keys.PAIRED_WALKIE_NODE_IDS] ?: emptySet()
+            prefs[Keys.PAIRED_WALKIE_NODE_IDS] = current + nodeId.toString()
+        }
+    }
+
+    suspend fun removePairedWalkieNodeId(nodeId: Long) {
+        appContext.itantraSettingsDataStore.edit { prefs ->
+            val current = prefs[Keys.PAIRED_WALKIE_NODE_IDS] ?: emptySet()
+            prefs[Keys.PAIRED_WALKIE_NODE_IDS] = current - nodeId.toString()
+        }
+    }
+
+    suspend fun setPairedWalkieNodeIds(nodeIds: Set<Long>) {
+        appContext.itantraSettingsDataStore.edit { prefs ->
+            prefs[Keys.PAIRED_WALKIE_NODE_IDS] = nodeIds.map { it.toString() }.toSet()
+        }
+    }
 
     suspend fun saveOnboardingProfile(
         name: String,

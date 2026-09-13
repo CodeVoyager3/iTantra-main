@@ -43,6 +43,8 @@ import com.itantra.app.mesh.DiscoveredBeacon
 import com.itantra.app.mesh.DistressBeaconPayload
 import com.itantra.app.mesh.ItantraPacket
 import com.itantra.app.mesh.PacketFraming
+import com.itantra.app.mesh.PairingHandshakePayload
+import com.itantra.app.mesh.PairingSyncPayload
 import com.itantra.app.mesh.PeerProfile
 import com.itantra.app.mesh.PeerProfileCache
 import com.itantra.app.mesh.ProfilePayload
@@ -665,6 +667,20 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private val _isSpeakerphoneOn = MutableStateFlow(true)
     val isSpeakerphoneOn: StateFlow<Boolean> = _isSpeakerphoneOn.asStateFlow()
 
+    data class WalkiePairRequest(
+        val fromNodeId: Long,
+        val fromCallsign: String
+    )
+
+    private val _incomingPairRequest = MutableStateFlow<WalkiePairRequest?>(null)
+    val incomingPairRequest: StateFlow<WalkiePairRequest?> = _incomingPairRequest.asStateFlow()
+
+    private val _pendingPairingTargetNodeId = MutableStateFlow<Long?>(null)
+    val pendingPairingTargetNodeId: StateFlow<Long?> = _pendingPairingTargetNodeId.asStateFlow()
+
+    private val latestWalkiePresenceBeacons = ConcurrentHashMap<Long, DiscoveredBeacon>()
+    private val lastPacketFromNode = ConcurrentHashMap<Long, Long>()
+
     private val _pairedWalkieDevices = MutableStateFlow<List<PeerDevice>>(emptyList())
     val pairedWalkieDevices: StateFlow<List<PeerDevice>> = _pairedWalkieDevices.asStateFlow()
 
@@ -740,6 +756,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     val isPttActive: StateFlow<Boolean> = _isPttActive.asStateFlow()
 
     fun startPtt() {
+        if (_isWalkieActive.value && !_isRescueActive.value && !_isSosBroadcasting.value) {
+            if (settingsRepository.pairedWalkieNodeIds.value.isEmpty()) {
+                _modelWarningMessage.value = "⚠️ No Paired Radios: Please pair with a nearby team radio before transmitting voice."
+                return
+            }
+        }
         if (_isCrossLingualBlocked.value) {
             val localLangName = _uiState.value.selectedLanguage.englishName
             val peerLangName = _activePeerLanguage.value?.let { SupportedLanguage.fromCode(it).englishName } ?: "Peer"
@@ -791,24 +813,130 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         wifiDirectMeshManager?.requestPeers()
         bleMeshManager?.startScanning()
         viewModelScope.launch {
-            // requestPeers() completes asynchronously via its listener; the
-            // timeout here just ends the visual "refreshing" state.
             delay(1500)
+            refreshWalkieDevicesList()
             _isRefreshingNodes.value = false
         }
     }
 
-    fun unpairDevice(peer: PeerDevice) {
-        _pairedWalkieDevices.update { it.filter { p -> p.id != peer.id } }
-        _discoveredWalkieDevices.update { it + peer.copy(isConnected = false) }
+    fun refreshWalkieDevicesList() {
+        val pairedNodeIds = settingsRepository.pairedWalkieNodeIds.value
+        val linked = bleMeshManager?.connectedNodeIds?.value.orEmpty()
+        val now = System.currentTimeMillis()
+
+        // 1. Rebuild Paired Devices from persistent storage
+        val pairedList = pairedNodeIds.map { peerNodeId ->
+            val beacon = latestWalkiePresenceBeacons[peerNodeId]
+            val lastContact = lastPacketFromNode[peerNodeId] ?: 0L
+            val isReachable = beacon != null || (now - lastContact < 10000L)
+            val rssi = beacon?.rssi ?: if (isReachable) -60 else -95
+            val battery = beacon?.batteryPercent ?: 100
+            val isGattLinked = peerNodeId in linked
+            PeerDevice(
+                id = "node-$peerNodeId",
+                name = nodeCallsign(peerNodeId),
+                address = nodeCallsign(peerNodeId),
+                protocol = TransportProtocol.BLE,
+                signalStrengthDbm = rssi,
+                isConnected = isReachable || isGattLinked,
+                batteryPercent = battery
+            ).withPeerProfile()
+        }
+        _pairedWalkieDevices.value = pairedList
+
+        // 2. Rebuild Discovered Devices (beacons heard that are not paired and not self)
+        val discoveredList = latestWalkiePresenceBeacons.values
+            .filter { it.nodeId != _nodeId.value && !pairedNodeIds.contains(it.nodeId) }
+            .map { beacon ->
+                PeerDevice(
+                    id = "node-${beacon.nodeId}",
+                    name = nodeCallsign(beacon.nodeId),
+                    address = nodeCallsign(beacon.nodeId),
+                    protocol = TransportProtocol.BLE,
+                    signalStrengthDbm = beacon.rssi,
+                    isConnected = false,
+                    batteryPercent = beacon.batteryPercent
+                ).withPeerProfile()
+            }
+            .distinctBy { it.id }
+
+        _discoveredWalkieDevices.value = discoveredList
+        updateWalkieLinkState()
     }
 
     fun pairDevice(peer: PeerDevice) {
-        _discoveredWalkieDevices.update { it.filter { p -> p.id != peer.id } }
-        _pairedWalkieDevices.update { it + peer.copy(isConnected = true) }
-        if (peer.protocol == TransportProtocol.WIFI_DIRECT) {
-            wifiDirectMeshManager?.connectTo(peer)
+        sendPairRequest(peer)
+    }
+
+    fun sendPairRequest(peer: PeerDevice) {
+        val targetNodeId = peer.peerNodeId() ?: return
+        _pendingPairingTargetNodeId.value = targetNodeId
+        val payload = PairingHandshakePayload(
+            targetNodeId = targetNodeId,
+            senderName = ownProfile().name.ifBlank { _callsign.value }
+        )
+        val packet = ItantraPacket(
+            nodeId = _nodeId.value,
+            ttl = _meshHopLimit.value,
+            msgType = PacketFraming.MSG_TYPE_PAIR_REQUEST,
+            payload = PairingHandshakePayload.encode(payload)
+        )
+        broadcastMeshPacket(PacketFraming.encode(packet), targetNodeId)
+        logVoice("pairing", "sent pair request to ${nodeCallsign(targetNodeId)} ($targetNodeId)")
+    }
+
+    fun acceptPairRequest(fromNodeId: Long) {
+        _incomingPairRequest.value = null
+        viewModelScope.launch {
+            settingsRepository.addPairedWalkieNodeId(fromNodeId)
         }
+        val payload = PairingHandshakePayload(
+            targetNodeId = fromNodeId,
+            senderName = ownProfile().name.ifBlank { _callsign.value }
+        )
+        val packet = ItantraPacket(
+            nodeId = _nodeId.value,
+            ttl = _meshHopLimit.value,
+            msgType = PacketFraming.MSG_TYPE_PAIR_ACCEPT,
+            payload = PairingHandshakePayload.encode(payload)
+        )
+        broadcastMeshPacket(PacketFraming.encode(packet), fromNodeId)
+        logVoice("pairing", "accepted pair request from ${nodeCallsign(fromNodeId)} ($fromNodeId)")
+    }
+
+    fun rejectPairRequest(fromNodeId: Long) {
+        _incomingPairRequest.value = null
+        val payload = PairingHandshakePayload(
+            targetNodeId = fromNodeId,
+            senderName = ownProfile().name.ifBlank { _callsign.value }
+        )
+        val packet = ItantraPacket(
+            nodeId = _nodeId.value,
+            ttl = _meshHopLimit.value,
+            msgType = PacketFraming.MSG_TYPE_PAIR_REJECT,
+            payload = PairingHandshakePayload.encode(payload)
+        )
+        broadcastMeshPacket(PacketFraming.encode(packet), fromNodeId)
+        logVoice("pairing", "rejected pair request from ${nodeCallsign(fromNodeId)} ($fromNodeId)")
+    }
+
+    fun unpairDevice(peer: PeerDevice) {
+        val targetNodeId = peer.peerNodeId() ?: return
+        viewModelScope.launch {
+            settingsRepository.removePairedWalkieNodeId(targetNodeId)
+        }
+        val payload = PairingHandshakePayload(
+            targetNodeId = targetNodeId,
+            senderName = ownProfile().name.ifBlank { _callsign.value }
+        )
+        val packet = ItantraPacket(
+            nodeId = _nodeId.value,
+            ttl = _meshHopLimit.value,
+            msgType = PacketFraming.MSG_TYPE_UNPAIR,
+            payload = PairingHandshakePayload.encode(payload)
+        )
+        broadcastMeshPacket(PacketFraming.encode(packet), targetNodeId)
+        logVoice("pairing", "unpaired node ${nodeCallsign(targetNodeId)} ($targetNodeId)")
     }
 
     // =========================================================================
@@ -1360,9 +1488,24 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         profileBroadcastJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 broadcastOwnProfile()
+                if (_isWalkieActive.value) {
+                    broadcastPairSync()
+                }
                 delay(PROFILE_BROADCAST_INTERVAL_MS)
             }
         }
+    }
+
+    private fun broadcastPairSync() {
+        val pairedIds = settingsRepository.pairedWalkieNodeIds.value
+        val payload = PairingSyncPayload(pairedNodeIds = pairedIds)
+        val packet = ItantraPacket(
+            nodeId = _nodeId.value,
+            ttl = _meshHopLimit.value,
+            msgType = PacketFraming.MSG_TYPE_PAIR_SYNC,
+            payload = PairingSyncPayload.encode(payload)
+        )
+        broadcastMeshPacket(PacketFraming.encode(packet))
     }
 
     /**
@@ -1379,8 +1522,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _nearbyRescuers.update { rescuers -> rescuers.map { it.withPeerProfile() } }
         }
         _connectedRescuer.update { it?.withPeerProfile() }
-        _discoveredWalkieDevices.update { peers -> peers.map { it.withPeerProfile() } }
-        _pairedWalkieDevices.update { peers -> peers.map { it.withPeerProfile() } }
+        refreshWalkieDevicesList()
     }
 
     private fun DistressVictim.withPeerProfile(): DistressVictim {
@@ -1407,9 +1549,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         return copy(name = name, address = name)
     }
 
-    /** BLE walkie peer ids carry their node id (`ble-<nodeId>`). */
+    /** Walkie peer ids carry their node id (`node-<nodeId>` or `ble-<nodeId>`). */
     private fun PeerDevice.peerNodeId(): Long? =
-        if (protocol == TransportProtocol.BLE) id.removePrefix("ble-").toLongOrNull() else null
+        id.removePrefix("node-").removePrefix("ble-").removePrefix("p2p-").toLongOrNull()
 
     private val vibrator: Vibrator? by lazy {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1599,15 +1741,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             }
         }
         if (_isWalkieActive.value) {
-            // Only nodes advertising Walkie presence are walkie peers; SOS
-            // victims and rescuers belong to their own screens.
             val presenceBeacons = beacons.filter {
                 it.altitudeMeters == DistressBeaconPayload.ALTITUDE_WALKIE_PRESENCE
             }
-            val linked = bleMeshManager?.connectedNodeIds?.value.orEmpty()
-            replaceDiscoveredWalkieDevices(presenceBeacons.map { it.toWalkiePeer(linked) }, TransportProtocol.BLE)
-            refreshPairedWalkieDevices(presenceBeacons, linked)
-            updateWalkieLinkState()
+            latestWalkiePresenceBeacons.clear()
+            presenceBeacons.forEach { latestWalkiePresenceBeacons[it.nodeId] = it }
+            refreshWalkieDevicesList()
         }
         beaconFirstSeen.keys.retainAll(beacons.map { it.nodeId }.toSet())
 
@@ -1616,77 +1755,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         // control lives in sendProfileToNodePromptly (per-node rate limit).
         if (_isSosBroadcasting.value || _isRescueActive.value || _isWalkieActive.value) {
             beacons.forEach { sendProfileToNodePromptly(it.nodeId) }
-        }
-    }
-
-    private fun DiscoveredBeacon.toWalkiePeer(linkedNodeIds: Set<Long>): PeerDevice {
-        val displayName = nodeCallsign(nodeId)
-        return PeerDevice(
-            id = "ble-$nodeId",
-            name = displayName,
-            address = displayName,
-            protocol = TransportProtocol.BLE,
-            signalStrengthDbm = rssi,
-            isConnected = nodeId in linkedNodeIds,
-            batteryPercent = batteryPercent
-        )
-    }
-
-    /** Keeps paired BLE radios showing live signal/battery/link state. */
-    private fun refreshPairedWalkieDevices(
-        presenceBeacons: List<DiscoveredBeacon>,
-        linkedNodeIds: Set<Long>
-    ) {
-        val byNodeId = presenceBeacons.associateBy { it.nodeId }
-        _pairedWalkieDevices.update { current ->
-            current.map { peer ->
-                if (peer.protocol != TransportProtocol.BLE) {
-                    peer
-                } else {
-                    val beacon = peer.id.removePrefix("ble-").toLongOrNull()?.let { byNodeId[it] }
-                    if (beacon == null) {
-                        peer.copy(isConnected = false)
-                    } else {
-                        peer.copy(
-                            signalStrengthDbm = beacon.rssi,
-                            batteryPercent = beacon.batteryPercent,
-                            isConnected = beacon.nodeId in linkedNodeIds
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    /** Keeps paired Wi-Fi Direct radios showing live link state. */
-    private fun refreshPairedP2pDevices(p2pPeers: List<PeerDevice>) {
-        val byId = p2pPeers.associateBy { it.id }
-        _pairedWalkieDevices.update { current ->
-            current.map { peer ->
-                if (peer.protocol != TransportProtocol.WIFI_DIRECT) {
-                    peer
-                } else {
-                    byId[peer.id]?.let {
-                        peer.copy(
-                            name = it.name,
-                            isConnected = it.isConnected,
-                            isP2pHost = it.isP2pHost
-                        )
-                    } ?: peer.copy(isConnected = false)
-                }
-            }
-        }
-    }
-
-    /**
-     * Replaces the discovered entries of one transport with the live set, so a
-     * peer that goes out of range disappears instead of lingering forever.
-     */
-    private fun replaceDiscoveredWalkieDevices(newPeers: List<PeerDevice>, protocol: TransportProtocol) {
-        _discoveredWalkieDevices.update { current ->
-            val paired = _pairedWalkieDevices.value.map { it.id }.toSet()
-            val otherTransport = current.filter { it.protocol != protocol }
-            (otherTransport + newPeers.filter { it.id !in paired }).distinctBy { it.id }
         }
     }
 
@@ -1788,7 +1856,93 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 peerTranslatorAvailable[packet.nodeId] = hasTrans
                 checkCrossLingualStatus()
             }
+            PacketFraming.MSG_TYPE_PAIR_REQUEST -> {
+                val req = PairingHandshakePayload.decode(packet.payload)
+                if (req != null && (req.targetNodeId == _nodeId.value || req.targetNodeId == 0L)) {
+                    if (req.senderName.isNotBlank()) {
+                        peerProfiles.put(packet.nodeId, PeerProfile(name = req.senderName))
+                        refreshPeerLabels()
+                    }
+                    if (settingsRepository.pairedWalkieNodeIds.value.contains(packet.nodeId)) {
+                        acceptPairRequest(packet.nodeId)
+                    } else {
+                        _incomingPairRequest.value = WalkiePairRequest(
+                            fromNodeId = packet.nodeId,
+                            fromCallsign = req.senderName.ifBlank { nodeCallsign(packet.nodeId) }
+                        )
+                        triggerTacticalAlertVibration()
+                        logVoice("pairing", "received pair request from ${nodeCallsign(packet.nodeId)} (${packet.nodeId})")
+                    }
+                }
+            }
+            PacketFraming.MSG_TYPE_PAIR_ACCEPT -> {
+                val acc = PairingHandshakePayload.decode(packet.payload)
+                if (acc != null && acc.targetNodeId == _nodeId.value) {
+                    if (acc.senderName.isNotBlank()) {
+                        peerProfiles.put(packet.nodeId, PeerProfile(name = acc.senderName))
+                        refreshPeerLabels()
+                    }
+                    viewModelScope.launch {
+                        settingsRepository.addPairedWalkieNodeId(packet.nodeId)
+                    }
+                    if (_pendingPairingTargetNodeId.value == packet.nodeId) {
+                        _pendingPairingTargetNodeId.value = null
+                    }
+                    triggerTacticalAlertVibration()
+                    logVoice("pairing", "pair accepted by ${nodeCallsign(packet.nodeId)}")
+                }
+            }
+            PacketFraming.MSG_TYPE_PAIR_REJECT -> {
+                val rej = PairingHandshakePayload.decode(packet.payload)
+                if (rej != null && rej.targetNodeId == _nodeId.value) {
+                    if (_pendingPairingTargetNodeId.value == packet.nodeId) {
+                        _pendingPairingTargetNodeId.value = null
+                    }
+                    logVoice("pairing", "pair rejected by ${nodeCallsign(packet.nodeId)}")
+                }
+            }
+            PacketFraming.MSG_TYPE_UNPAIR -> {
+                val unp = PairingHandshakePayload.decode(packet.payload)
+                if (unp != null && (unp.targetNodeId == _nodeId.value || settingsRepository.pairedWalkieNodeIds.value.contains(packet.nodeId))) {
+                    viewModelScope.launch {
+                        settingsRepository.removePairedWalkieNodeId(packet.nodeId)
+                    }
+                    logVoice("pairing", "unpaired by peer ${nodeCallsign(packet.nodeId)}")
+                }
+            }
+            PacketFraming.MSG_TYPE_PAIR_SYNC -> {
+                val sync = PairingSyncPayload.decode(packet.payload)
+                if (sync != null) {
+                    val myId = _nodeId.value
+                    val peerId = packet.nodeId
+                    val iAmPairedWithPeer = settingsRepository.pairedWalkieNodeIds.value.contains(peerId)
+                    val peerIsPairedWithMe = sync.pairedNodeIds.contains(myId)
+
+                    if (iAmPairedWithPeer && !peerIsPairedWithMe) {
+                        viewModelScope.launch {
+                            settingsRepository.removePairedWalkieNodeId(peerId)
+                        }
+                        logVoice("pairing", "sync: peer $peerId removed us, synced local status to unpaired")
+                    } else if (!iAmPairedWithPeer && peerIsPairedWithMe) {
+                        val unpairPayload = PairingHandshakePayload(targetNodeId = peerId, senderName = ownProfile().name)
+                        val unpairPacket = ItantraPacket(
+                            nodeId = _nodeId.value,
+                            ttl = _meshHopLimit.value,
+                            msgType = PacketFraming.MSG_TYPE_UNPAIR,
+                            payload = PairingHandshakePayload.encode(unpairPayload)
+                        )
+                        broadcastMeshPacket(PacketFraming.encode(unpairPacket), peerId)
+                        logVoice("pairing", "sync: informed peer $peerId that we unpaired them")
+                    }
+                }
+            }
             PacketFraming.MSG_TYPE_TRANSLATED_TEXT -> {
+                if (_isWalkieActive.value && !_isRescueActive.value && !_isSosBroadcasting.value) {
+                    if (!settingsRepository.pairedWalkieNodeIds.value.contains(packet.nodeId)) {
+                        logVoice("rx", "walkie text dropped: sender ${nodeCallsign(packet.nodeId)} is not paired")
+                        return
+                    }
+                }
                 refreshRescuerContact(packet.nodeId)
                 refreshVictimContact(packet.nodeId)
                 val rawPayload = String(packet.payload, Charsets.UTF_8)
@@ -2297,6 +2451,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         val connectedVictim = _connectedVictimIntercom.value
         if (_isRescueActive.value && connectedVictim == null) {
             // In Rescue mode while searching radar, play incoming distress text from any survivor!
+            return true
+        }
+        if (_isWalkieActive.value && !_isRescueActive.value && !_isSosBroadcasting.value) {
+            val isPaired = settingsRepository.pairedWalkieNodeIds.value.contains(senderNodeId)
+            if (!isPaired) {
+                logVoice("rx", "walkie audio suppressed: sender ${nodeCallsign(senderNodeId)} ($senderNodeId) is not in paired list")
+                return false
+            }
             return true
         }
         return VoiceCaptureGate.shouldPlayIncomingVoice(
@@ -3336,6 +3498,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 audioCaptureEngine?.noiseSuppressionEnabled = s.noiseSuppressionEnabled
             }
         }
+
+        viewModelScope.launch {
+            settingsRepository.pairedWalkieNodeIds.collect {
+                refreshWalkieDevicesList()
+            }
+        }
     }
 
     fun completeOnboarding(
@@ -3500,12 +3668,11 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 handleIncomingDatagram(bytes)
             }
         }
-        // Wi-Fi Direct peer list -> walkie discovered devices.
+        // Wi-Fi Direct peer list -> refresh link state without injecting duplicate devices
         viewModelScope.launch {
-            wifiDirectMeshManager?.peers?.collect { peers ->
+            wifiDirectMeshManager?.peers?.collect {
                 if (_isWalkieActive.value) {
-                    replaceDiscoveredWalkieDevices(peers, TransportProtocol.WIFI_DIRECT)
-                    refreshPairedP2pDevices(peers)
+                    refreshWalkieDevicesList()
                 }
             }
         }

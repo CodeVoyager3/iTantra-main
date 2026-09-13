@@ -17,8 +17,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -128,6 +130,8 @@ fun WalkieScreen(
     val isSpeakerphoneOn by viewModel.isSpeakerphoneOn.collectAsState()
     val pairedDevices by viewModel.pairedWalkieDevices.collectAsState()
     val discoveredDevices by viewModel.discoveredWalkieDevices.collectAsState()
+    val incomingPairRequest by viewModel.incomingPairRequest.collectAsState()
+    val pendingPairingTargetNodeId by viewModel.pendingPairingTargetNodeId.collectAsState()
     val isVadSpeaking by viewModel.isVadSpeaking.collectAsState()
     val audioLevel by viewModel.audioLevel.collectAsState()
     val isWalkieLinkActive by viewModel.isWalkieLinkActive.collectAsState()
@@ -286,6 +290,107 @@ fun WalkieScreen(
                         letterSpacing = 0.6.sp,
                         color = if (isWalkieActive) colors.badgeMintText else colors.textSecondary
                     )
+                }
+            }
+        }
+
+        // =======================================================
+        // INCOMING PAIRING REQUEST APPROVAL BANNER
+        // =======================================================
+        AnimatedVisibility(
+            visible = incomingPairRequest != null,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            val req = incomingPairRequest
+            if (req != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .shadow(elevation = 6.dp, shape = RoundedCornerShape(20.dp), spotColor = AccentBlue.copy(alpha = 0.35f))
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(
+                            Brush.linearGradient(
+                                listOf(
+                                    Color(0xFF0F172A),
+                                    Color(0xFF1E293B)
+                                )
+                            )
+                        )
+                        .border(1.5.dp, AccentBlue, RoundedCornerShape(20.dp))
+                        .padding(16.dp)
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(text = "🤝", fontSize = 18.sp)
+                                Text(
+                                    text = "PAIRING REQUEST",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = AccentBlue,
+                                    letterSpacing = 1.sp
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(AccentBlueContainer)
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "APPROVAL REQUIRED",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AccentBlue
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = "${req.fromCallsign} wants to pair with your radio to start sharing Walkie-Talkie voice.",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                onClick = { viewModel.rejectPairRequest(req.fromNodeId) },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF334155),
+                                    contentColor = Color(0xFFCBD5E1)
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Decline", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+
+                            Button(
+                                onClick = { viewModel.acceptPairRequest(req.fromNodeId) },
+                                modifier = Modifier.weight(1.3f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MeshGreen,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Accept & Pair", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1167,6 +1272,9 @@ fun WalkieScreen(
                     }
 
                     discoveredDevices.forEach { peer ->
+                        val peerNodeId = peer.id.removePrefix("node-").removePrefix("ble-").removePrefix("p2p-").toLongOrNull()
+                        val isPending = pendingPairingTargetNodeId != null && pendingPairingTargetNodeId == peerNodeId
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1190,29 +1298,36 @@ fun WalkieScreen(
                                     else -> "Fair Signal"
                                 }
                                 Text(
-                                    text = "${if (peer.protocol == TransportProtocol.BLE) "BLE" else "Wi-Fi Direct"} • $signalDesc",
+                                    text = "Radio Mesh • $signalDesc",
                                     fontSize = 11.sp,
                                     color = colors.textSecondary
                                 )
                             }
 
                             Button(
-                                onClick = { viewModel.pairDevice(peer) },
+                                onClick = { viewModel.sendPairRequest(peer) },
+                                enabled = !isPending,
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = colors.accent,
-                                    contentColor = Color.White
+                                    containerColor = if (isPending) colors.outline else colors.accent,
+                                    contentColor = Color.White,
+                                    disabledContainerColor = colors.cardSecondaryBg,
+                                    disabledContentColor = colors.textSecondary
                                 ),
                                 shape = RoundedCornerShape(10.dp),
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                 modifier = Modifier.height(34.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Add,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Pair", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                if (isPending) {
+                                    Text("Requesting...", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Add,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Pair", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
