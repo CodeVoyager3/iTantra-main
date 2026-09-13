@@ -192,19 +192,6 @@ fun RescueScreen(
     val isPttActive by viewModel.isPttActive.collectAsState()
     val isModelInstalled = modelPacks.firstOrNull { it.iso == selectedLanguage.code || it.languageTag.startsWith(selectedLanguage.code) }?.isInstalled == true
 
-    val speechLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spokenText = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!spokenText.isNullOrBlank()) {
-                viewModel.sendBroadcastTextMessage(spokenText)
-            }
-        }
-    }
-
     var showLanguageSheet by remember { mutableStateOf(false) }
     var languageSearchQuery by remember { mutableStateOf("") }
 
@@ -1238,94 +1225,6 @@ fun RescueScreen(
                             }
                         }
 
-                        // Voice Controls Row: Hold to Talk (PTT) + Instant Voice Dictate
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // 1. Hold to Talk (PTT) Button
-                            Box(
-                                modifier = Modifier
-                                    .weight(1.2f)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(
-                                        if (isPttActive || isVadSpeaking) RescueAmber
-                                        else if (colors.isDark) Color(0xFF1E293B)
-                                        else Color(0xFFF1F5F9)
-                                    )
-                                    .border(
-                                        1.dp,
-                                        if (isPttActive || isVadSpeaking) Color(0xFFD97706)
-                                        else colors.outline,
-                                        RoundedCornerShape(12.dp)
-                                    )
-                                    .pointerInput(Unit) {
-                                        detectTapGestures(
-                                            onPress = {
-                                                viewModel.startPtt()
-                                                tryAwaitRelease()
-                                                viewModel.stopPtt()
-                                            }
-                                        )
-                                    }
-                                    .padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Mic,
-                                        contentDescription = "Hold to talk",
-                                        tint = if (isPttActive || isVadSpeaking) Color.White else RescueAmberText,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = if (isPttActive || isVadSpeaking) "RECORDING..." else "HOLD TO TALK",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isPttActive || isVadSpeaking) Color.White else colors.textPrimary
-                                    )
-                                }
-                            }
-
-                            // 2. Voice Dictation Button (Android SpeechRecognizer in selected language)
-                            Box(
-                                modifier = Modifier
-                                    .weight(0.9f)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(AccentBlue.copy(alpha = 0.12f))
-                                    .border(1.dp, AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                    .clickable {
-                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, selectedLanguage.languageTag)
-                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, selectedLanguage.languageTag)
-                                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in ${selectedLanguage.nativeName}...")
-                                        }
-                                        try {
-                                            speechLauncher.launch(intent)
-                                        } catch (_: Exception) {}
-                                    }
-                                    .padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = "🗣️ DICTATE",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = AccentBlue
-                                    )
-                                }
-                            }
-                        }
-
                         // Active speaking recording pulse banner
                         if (isVadSpeaking || isPttActive) {
                             Box(
@@ -1442,48 +1341,13 @@ fun RescueScreen(
                                     )
                                     Text(
                                         text = if (isModelInstalled)
-                                            "Speak clearly into mic or hold button. Neural AI STT will transcribe and broadcast text to victims over mesh for instant TTS playback."
+                                            "Hands-free voice active. Neural AI STT will transcribe and broadcast your speech to victims over mesh for instant TTS playback."
                                         else
-                                            "Neural STT pack is not downloaded. Use HOLD TO TALK or DICTATE, or tap Quick Rescuer Phrases below.",
+                                            "Neural STT pack is not downloaded. Voice-to-text requires the offline language model in Model Hub.",
                                         fontSize = 11.sp,
                                         color = colors.textSecondary,
                                         lineHeight = 15.sp
                                     )
-                                }
-                            }
-                        }
-
-                        // Localized Quick Rescuer Transmit Chips
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                text = "QUICK RESCUER PHRASES (${selectedLanguage.nativeName.uppercase()})",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.5.sp,
-                                color = colors.textSecondary
-                            )
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                selectedLanguage.quickRescuePhrases.forEach { phrase ->
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (colors.isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9))
-                                            .border(0.5.dp, colors.outline, RoundedCornerShape(8.dp))
-                                            .clickable { viewModel.sendBroadcastTextMessage(phrase) }
-                                            .padding(horizontal = 10.dp, vertical = 7.dp)
-                                    ) {
-                                        Text(
-                                            text = phrase,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = colors.textPrimary
-                                        )
-                                    }
                                 }
                             }
                         }

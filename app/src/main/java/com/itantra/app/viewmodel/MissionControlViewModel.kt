@@ -423,6 +423,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun startSos() {
+        clearSessionTranscripts()
         _isSosBroadcasting.value = true
         _wifiDirectEnabled.value = true
         _bluetoothEnabled.value = true
@@ -446,6 +447,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun stopSos() {
+        clearSessionTranscripts()
         _isSosBroadcasting.value = false
         _connectedRescuer.value = null
         _nearbyRescuers.value = emptyList()
@@ -467,6 +469,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
      * Notifies the rescuer via UDP mesh and returns this victim to silent SOS standby.
      */
     fun disconnectConnectedRescuer() {
+        clearSessionTranscripts()
         lastExplicitDisconnectEpochMs = System.currentTimeMillis()
         val rescuer = _connectedRescuer.value
         if (rescuer != null) {
@@ -557,6 +560,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     val vadStatus: StateFlow<VadStatus> = _vadStatus.asStateFlow()
 
     fun toggleWalkieMaster(active: Boolean) {
+        clearSessionTranscripts()
         _isWalkieActive.value = active
         if (active) {
             startMeshVoiceCapture()
@@ -734,6 +738,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun bootRescueSystem(active: Boolean) {
+        clearSessionTranscripts()
         _isRescueActive.value = active
         if (active) {
             bleMeshManager?.startScanning()
@@ -772,6 +777,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun toggleBroadcastToAll() {
+        clearSessionTranscripts()
         val willBroadcast = !_isBroadcastingToAll.value
         _isBroadcastingToAll.value = willBroadcast
         if (willBroadcast) {
@@ -813,6 +819,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun connectVictimIntercom(victim: DistressVictim) {
+        clearSessionTranscripts()
         // Zero-friction instant 1-to-1 connect.
         _isBroadcastingToAll.value = false
         _selectedVictim.value = victim
@@ -841,6 +848,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun disconnectVictimIntercom() {
+        clearSessionTranscripts()
         val target = _connectedVictimIntercom.value
         if (target != null) {
             val close = ItantraPacket(
@@ -1666,7 +1674,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             // Echo guard (defense in depth): ignore turn starts while our own
             // playback is active — the engine already suppresses the trigger.
             if (!isEchoGuardActive()) {
-                if (speaking) voiceFrameSequence = 0
+                if (speaking) {
+                    voiceFrameSequence = 0
+                    voiceTurnCoordinator.onSpeechStarted()
+                } else {
+                    voiceTurnCoordinator.onSpeechEnded()
+                }
                 _isVadSpeaking.value = speaking
                 _vadStatus.value = if (speaking) VadStatus.SPEECH_DETECTED else VadStatus.SILENCE
                 _isTransmitting.value = speaking && !_isMicMuted.value
@@ -1681,6 +1694,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         capture.onLevelChanged = { level -> _audioLevel.value = level }
         capture.onSpeechProbability = { prob -> _speechProbability.value = prob }
         capture.onEndOfTurn = {
+            voiceTurnCoordinator.onSpeechEnded()
             val bufferSize = synchronized(voiceTurnBuffer ?: this) { voiceTurnBuffer?.size() ?: 0 }
             val action = voiceTurnCoordinator.evaluateTurn(bufferSize)
             if (action == VoiceTurnCoordinator.TurnAction.FLUSH_STT) {
@@ -2595,6 +2609,28 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     /** Zero-log wipe of the in-memory message buffer. */
     fun clearLogs() {
         _messageLogs.value = emptyList()
+    }
+
+    /**
+     * Clears all session transcripts, message history, active captions, and turn buffers
+     * so that entering or exiting a mission mode starts with a clean slate.
+     */
+    fun clearSessionTranscripts() {
+        _messageLogs.value = emptyList()
+        _uiState.update {
+            it.copy(
+                currentTranscript = "",
+                activeIncomingCaption = null,
+                voiceStatus = null,
+                channelState = RadioChannelState.STANDBY
+            )
+        }
+        synchronized(voiceTurnBuffer ?: this) {
+            voiceTurnBuffer?.reset()
+        }
+        voiceTurnCoordinator.onSpeechEnded()
+        _isVadSpeaking.value = false
+        _isTransmitting.value = false
     }
 
     /**

@@ -33,17 +33,20 @@ class AudioCaptureEngine(context: Context) {
         const val FRAME_BYTES = SAMPLE_RATE_HZ * 2 * FRAME_MS / 1000 // 640
         const val FRAME_SHORTS = FRAME_BYTES / 2 // 320
 
-        /** Margin (dB) above the noise floor required to trigger speech (5.0 dB for near-mic speech). */
-        private const val SPEECH_TRIGGER_DB = 5.0
+        /** Margin (dB) above the noise floor required to trigger speech (5.5 dB for near-mic speech). */
+        private const val SPEECH_TRIGGER_DB = 5.5
 
         /** Number of consecutive loud frames before speech is declared (~40ms). */
         private const val SPEECH_TRIGGER_FRAMES = 2
 
-        /** Margin (dB) below which speech is considered ended (3.5 dB ensures fan noise doesn't lock VAD). */
-        private const val SPEECH_RELEASE_DB = 3.5
+        /** Margin (dB) below which speech is considered ended (4.0 dB ensures fan noise doesn't lock VAD). */
+        private const val SPEECH_RELEASE_DB = 4.0
 
         /** Silence duration (ms) before an end-of-turn event fires (400ms for snappy natural speech pauses). */
         private const val END_OF_TURN_MS = 400L
+
+        /** Maximum duration (ms) of continuous speech before safety force-cutoff (6.0s prevents VAD lockup). */
+        private const val MAX_SPEECH_DURATION_MS = 6000L
 
         /** Number of 20ms frames (~100ms) kept in ring buffer to preserve leading phonemes. */
         private const val PRE_SPEECH_FRAMES = 5
@@ -225,6 +228,7 @@ class AudioCaptureEngine(context: Context) {
         var noiseFloor = -1.0 // initialized from the first frame
         var consecutiveSpeechFrames = 0
         var silentFrames = 0
+        var speakingFrames = 0
         var echoGuardWasActive = false
 
         while (running) {
@@ -264,6 +268,7 @@ class AudioCaptureEngine(context: Context) {
                 }
                 consecutiveSpeechFrames = 0
                 silentFrames = 0
+                speakingFrames = 0
                 preSpeechBuffer.clear()
                 echoGuardWasActive = true
                 _level01.value = 0f
@@ -282,25 +287,39 @@ class AudioCaptureEngine(context: Context) {
                     onSpeechStateChanged?.invoke(false)
                 }
                 silentFrames = 0
+                speakingFrames = 0
                 consecutiveSpeechFrames = 0
                 preSpeechBuffer.clear()
             }
 
             if (speaking) {
+                speakingFrames++
                 if (marginDb >= SPEECH_RELEASE_DB) {
                     silentFrames = 0
                 } else {
                     silentFrames++
                 }
-                if (silentFrames * FRAME_MS >= END_OF_TURN_MS) {
+
+                // If speech has paused or dipped, gently allow noise floor adaptation
+                // so a sudden ambient level shift (fan, motor) does not lock VAD in speaking state.
+                if (marginDb < SPEECH_TRIGGER_DB && rms <= noiseFloor * 1.5) {
+                    noiseFloor = (noiseFloor * 0.98 + rms * 0.02).coerceIn(MIN_NOISE_FLOOR, MAX_NOISE_FLOOR)
+                }
+
+                val silenceReached = silentFrames * FRAME_MS >= END_OF_TURN_MS
+                val maxTurnDurationReached = speakingFrames * FRAME_MS >= MAX_SPEECH_DURATION_MS
+
+                if (silenceReached || maxTurnDurationReached) {
                     speaking = false
                     _speechActive.value = false
                     preSpeechBuffer.clear()
                     onSpeechStateChanged?.invoke(false)
                     onEndOfTurn?.invoke()
                     silentFrames = 0
+                    speakingFrames = 0
                 }
             } else {
+                speakingFrames = 0
                 if (marginDb >= SPEECH_TRIGGER_DB) {
                     consecutiveSpeechFrames++
                 } else {
@@ -308,6 +327,7 @@ class AudioCaptureEngine(context: Context) {
                 }
                 if (consecutiveSpeechFrames >= SPEECH_TRIGGER_FRAMES) {
                     speaking = true
+                    speakingFrames = 0
                     _speechActive.value = true
                     onSpeechStateChanged?.invoke(true)
                     silentFrames = 0

@@ -164,19 +164,6 @@ fun SosDistressScreen(
     val isMicMuted by viewModel.isMicMuted.collectAsState()
     val isSpeakerphoneOn by viewModel.isSpeakerphoneOn.collectAsState()
 
-    val speechLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spokenText = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!spokenText.isNullOrBlank()) {
-                viewModel.sendBroadcastTextMessage(spokenText)
-            }
-        }
-    }
-
     val scrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
 
@@ -1259,7 +1246,7 @@ fun SosDistressScreen(
                                 }
                             }
 
-                            // Voice Controls Row: Hold to Talk (PTT) + Instant Voice Dictate
+                            // Voice Controls Row: Receive-only status when rescuer broadcasts
                             if (isReceivingOneWayBroadcast) {
                                 // Receive-only participant of a 1-way rescuer broadcast:
                                 // no talk/mic affordance is shown, because nothing sent
@@ -1290,97 +1277,10 @@ fun SosDistressScreen(
                                                 color = colors.textPrimary
                                             )
                                             Text(
-                                                text = "Rescuer is transmitting one-way. Mic and dictation are disabled.",
+                                                text = "Rescuer is transmitting one-way. Mic is disabled.",
                                                 fontSize = 11.sp,
                                                 color = colors.textSecondary,
                                                 lineHeight = 15.sp
-                                            )
-                                        }
-                                    }
-                                }
-                            } else {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    // 1. Hold to Talk (PTT) Button
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1.2f)
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(
-                                                if (isPttActive || isVadSpeaking) Color(0xFFDC2626)
-                                                else if (colors.isDark) Color(0xFF1E293B)
-                                                else Color(0xFFF1F5F9)
-                                            )
-                                            .border(
-                                                1.dp,
-                                                if (isPttActive || isVadSpeaking) Color(0xFFB91C1C)
-                                                else colors.outline,
-                                                RoundedCornerShape(12.dp)
-                                            )
-                                            .pointerInput(Unit) {
-                                                detectTapGestures(
-                                                    onPress = {
-                                                        viewModel.startPtt()
-                                                        tryAwaitRelease()
-                                                        viewModel.stopPtt()
-                                                    }
-                                                )
-                                            }
-                                            .padding(vertical = 10.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Mic,
-                                                contentDescription = "Hold to talk",
-                                                tint = if (isPttActive || isVadSpeaking) Color.White else SosRedDark,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Text(
-                                                text = if (isPttActive || isVadSpeaking) "RECORDING..." else "HOLD TO TALK",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = if (isPttActive || isVadSpeaking) Color.White else colors.textPrimary
-                                            )
-                                        }
-                                    }
-
-                                    // 2. Voice Dictation Button (Android SpeechRecognizer in selected language)
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(0.9f)
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(AccentBlue.copy(alpha = 0.12f))
-                                            .border(1.dp, AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                            .clickable {
-                                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, selectedLanguage.languageTag)
-                                                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, selectedLanguage.languageTag)
-                                                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in ${selectedLanguage.nativeName}...")
-                                                }
-                                                try {
-                                                    speechLauncher.launch(intent)
-                                                } catch (_: Exception) {}
-                                            }
-                                            .padding(vertical = 10.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Text(
-                                                text = "🗣️ DICTATE",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = AccentBlue
                                             )
                                         }
                                     }
@@ -1503,9 +1403,9 @@ fun SosDistressScreen(
                                         )
                                         Text(
                                             text = if (selectedPack?.isInstalled == true)
-                                                "Speak clearly into mic or hold button. Neural AI STT will transcribe and broadcast text over mesh for TTS playback."
+                                                "Hands-free voice active. Neural AI STT will transcribe and broadcast text over mesh for TTS playback."
                                             else
-                                                "Neural STT pack is not downloaded. Use HOLD TO TALK or DICTATE, or tap Quick Emergency Phrases below.",
+                                                "Neural STT pack is not downloaded. Voice-to-text requires the offline language model in Model Hub.",
                                             fontSize = 11.sp,
                                             color = colors.textSecondary,
                                             lineHeight = 15.sp
