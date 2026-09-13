@@ -30,6 +30,7 @@
          to be visible. Runtime prompt is not wired in MainActivity (left
          untouched); the FGS itself still runs without it. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- ── Internet (future / optional cloud fallback) ── -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -64,10 +65,16 @@
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.ITantra"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.itantra.app.ACTION_EMERGENCY_LOCKSCREEN_SOS" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 

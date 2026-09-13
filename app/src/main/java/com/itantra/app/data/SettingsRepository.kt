@@ -86,6 +86,8 @@ class SettingsRepository(context: Context) {
         val RELATIVE_PHONE = stringPreferencesKey("relative_phone")
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val PAIRED_WALKIE_NODE_IDS = stringSetPreferencesKey("paired_walkie_node_ids")
+        val SELECTED_LANGUAGE_CODE = stringPreferencesKey("selected_language_code")
+        val POWER_BUTTON_SOS_ENABLED = booleanPreferencesKey("power_button_sos_enabled")
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -125,6 +127,14 @@ class SettingsRepository(context: Context) {
         }
         .stateIn(scope, SharingStarted.Eagerly, emptySet())
 
+    val selectedLanguageCode: StateFlow<String?> = appContext.itantraSettingsDataStore.data
+        .map { prefs -> prefs[Keys.SELECTED_LANGUAGE_CODE] }
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
+    val powerButtonSosEnabled: StateFlow<Boolean> = appContext.itantraSettingsDataStore.data
+        .map { prefs -> prefs[Keys.POWER_BUTTON_SOS_ENABLED] ?: true }
+        .stateIn(scope, SharingStarted.Eagerly, true)
+
     /** Sentinel meaning "no persistent mesh node id assigned yet". */
     val nodeId: StateFlow<Long> = appContext.itantraSettingsDataStore.data
         .map { prefs -> prefs[Keys.NODE_ID] ?: AppSettings.NODE_ID_UNSET }
@@ -143,6 +153,9 @@ class SettingsRepository(context: Context) {
         put(Keys.NODE_ID, generated)
         return generated
     }
+
+    suspend fun setSelectedLanguageCode(value: String) = put(Keys.SELECTED_LANGUAGE_CODE, value)
+    suspend fun setPowerButtonSosEnabled(value: Boolean) = put(Keys.POWER_BUTTON_SOS_ENABLED, value)
 
     suspend fun setThemeMode(value: String) = put(Keys.THEME_MODE, value)
     suspend fun setCallsign(value: String) = put(Keys.CALLSIGN, value)

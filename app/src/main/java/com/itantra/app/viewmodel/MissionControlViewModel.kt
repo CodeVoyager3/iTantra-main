@@ -282,6 +282,25 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _translationDownloadState.value = ModelDownloadState.Installed
             checkCrossLingualStatus()
         }
+
+        viewModelScope.launch {
+            val savedLangCode = settingsRepository.selectedLanguageCode.value
+            if (!savedLangCode.isNullOrBlank()) {
+                val lang = SupportedLanguage.fromCode(savedLangCode)
+                _uiState.update { it.copy(selectedLanguage = lang) }
+                prewarmTts(lang)
+            } else {
+                // If default is not installed on disk, but another installed pack exists (e.g. "en"), prefer the installed pack
+                val currentCode = _uiState.value.selectedLanguage.code
+                if (!modelStorageManager.isInstalledOnDisk(currentCode)) {
+                    if (modelStorageManager.isInstalledOnDisk("en")) {
+                        val en = SupportedLanguage.ENGLISH
+                        _uiState.update { it.copy(selectedLanguage = en) }
+                        prewarmTts(en)
+                    }
+                }
+            }
+        }
     }
 
     fun downloadTranslationModel() {
@@ -768,6 +787,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _modelWarningMessage.value = "⚠️ Language Mismatch: Local speaks $localLangName but peer speaks $peerLangName. Offline Translation model required before voice conversation. Please download in Settings → Models."
             return
         }
+        // Immediately silence any incoming audio playback and clear echo guard so user's PTT voice records instantly
+        ttsPlaybackJob?.cancel()
+        audioPlaybackEngine?.stop()
+        systemTts?.stop()
+        echoGuardUntil = 0L
+
         startMeshVoiceCapture()
         voiceFrameSequence = 0
         synchronized(voiceTurnBuffer ?: this) {
@@ -2060,22 +2085,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 }
             }
             PacketFraming.MSG_TYPE_VOICE_FRAME -> {
-                // Strictly gate raw audio frames: only play if authorized by local mode
-                if (!shouldPlayIncomingVoiceText(packet.nodeId)) {
-                    return
-                }
-                refreshRescuerContact(packet.nodeId)
-                refreshVictimContact(packet.nodeId)
-                val decoded = VoiceFrame.decode(packet.payload)
-                val pcm = decoded?.pcm ?: packet.payload
-                // Echo guard: half-duplex intercom — suppress our mic while
-                // this frame plays, or the speaker feeds the mic and the
-                // live voice stream loops between phones.
-                extendEchoGuard(pcm.size * 1000L / (AudioCaptureEngine.SAMPLE_RATE_HZ * 2))
-                audioPlaybackEngine?.play(pcm, AudioCaptureEngine.SAMPLE_RATE_HZ)
-                val rms = calculateRmsLevel(pcm)
-                markReceivingAudio(rms)
-                _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
+                // Ignore raw voice frames to preserve clean neural text-mesh voice pipeline & duplex intercom
+                return
             }
             PacketFraming.MSG_TYPE_VOICE_LINK_REQUEST -> {
                 // A rescuer is opening an intercom toward this device (we are
@@ -2209,7 +2220,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     // half-duplex radio while self-playback is active.
 
     /** AudioTrack drain + speaker/reverb tail appended to every guard window. */
-    private val echoGuardDecayMs = 500L
+    private val echoGuardDecayMs = 250L
 
     /** System-TTS engine latency before utterance audio actually starts. */
     private val ttsStartWindowMs = 2000L
@@ -2261,16 +2272,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             // Echo guard (defense in depth — the engine also gates): never
             // retransmit or transcribe audio captured during self-playback.
             if (!_isMicMuted.value && (_isVadSpeaking.value || _isPttActive.value) && !isEchoGuardActive()) {
-                // Real-time live audio streaming to paired Walkie-Talkie radios or active emergency intercom
-                val shouldStreamLiveAudio = (_isWalkieActive.value && settingsRepository.pairedWalkieNodeIds.value.isNotEmpty()) ||
-                    (_isRescueActive.value && _connectedVictimIntercom.value != null) ||
-                    (_isSosBroadcasting.value && _connectedRescuer.value != null) ||
-                    _isBroadcastingToAll.value
-
-                if (shouldStreamLiveAudio && !_isCrossLingualBlocked.value) {
-                    enqueueVoiceFrame(frame)
-                }
-
                 // Low-bitrate text mesh: speech frames accumulate locally for on-device STT.
                 val currentSize: Int
                 synchronized(voiceTurnBuffer ?: this) {
@@ -2482,6 +2483,16 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         )
     }
 
+    private fun Char.isSpeechContentChar(): Boolean {
+        if (this.isLetterOrDigit()) return true
+        val type = Character.getType(this)
+        return type == Character.NON_SPACING_MARK.toInt() ||
+            type == Character.COMBINING_SPACING_MARK.toInt() ||
+            type == Character.MODIFIER_LETTER.toInt() ||
+            type == Character.MODIFIER_SYMBOL.toInt() ||
+            type == Character.OTHER_LETTER.toInt()
+    }
+
     /**
      * Converts the buffered voice turn to text via On-Device STT
      * (IndicConformer) and broadcasts the text packet (~20-50 bytes) as the
@@ -2503,10 +2514,10 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             pcmBytes = buffer.toByteArray()
             buffer.reset()
         }
-        // Discard tiny noise bursts (< 250ms of audio = 8000 bytes) before
+        // Discard tiny noise bursts (< minTurnBytes = 200ms of audio = 6400 bytes) before
         // they reach STT and come out as garbage single characters
-        if (pcmBytes.size < 8000) {
-            Log.d("MissionControl", "flushVoiceTurn: Discarding noise burst (<250ms, ${pcmBytes.size} bytes)")
+        if (pcmBytes.size < voiceTurnCoordinator.minTurnBytes) {
+            Log.d("MissionControl", "flushVoiceTurn: Discarding noise burst (<200ms, ${pcmBytes.size} bytes)")
             viewModelScope.launch(Dispatchers.Main) {
                 if (_uiState.value.voiceStatus != null) {
                     _uiState.update { it.copy(currentTranscript = "").clearStatus() }
@@ -2553,22 +2564,18 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 withContext(Dispatchers.Main) {
                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY).clearStatus() }
                     _modelWarningMessage.value =
-                        "⚠️ Live voice delivered. Download the ${selectedLang.englishName} Neural STT pack in Settings for live text transcription."
+                        "⚠️ Neural STT pack for ${selectedLang.englishName} is not downloaded. Please download in Settings → Models or tap an installed language chip."
                 }
                 return@launch
             }
 
-            // Post-STT noise gate: STT renders noise bursts as sub-word
-            // artifacts (a stray 'क', 'कक', 'a1', bare punctuation) which
-            // every receiving phone would SPEAK via TTS. Require at least 2
-            // letters/digits making up at least ~40% of the content length
-            // (whitespace/punctuation ignored) before this turn broadcasts.
+            // Post-STT noise gate: support both Latin & Indic scripts (including vowel signs / matras)
+            // Require at least 1 valid speech character making up >= 25% of string length
             val cleanText = transcribedText.trim()
-            val alnumCount = cleanText.count { it.isLetterOrDigit() }
-            val strippedLength = cleanText.count { !it.isWhitespace() && !it.isPunctuationMark() }
-            val alnumRatio = if (strippedLength > 0) alnumCount.toFloat() / strippedLength else 0f
-            if (cleanText.isBlank() || alnumCount < 2 || alnumRatio < 0.4f) {
-                Log.d("MissionControl", "flushVoiceTurn: Noise transcription ('$cleanText', alnum=$alnumCount/$strippedLength), dropping turn")
+            val contentCharCount = cleanText.count { it.isSpeechContentChar() }
+            val contentRatio = if (cleanText.isNotEmpty()) contentCharCount.toFloat() / cleanText.length else 0f
+            if (cleanText.isBlank() || contentCharCount < 1 || contentRatio < 0.25f) {
+                Log.d("MissionControl", "flushVoiceTurn: Noise transcription ('$cleanText', content=$contentCharCount/${cleanText.length}), dropping turn")
                 withContext(Dispatchers.Main) {
                     when {
                         _isPttActive.value ->
@@ -2827,10 +2834,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 return@launch
             }
             val onnx = onnxInferenceManager ?: return@launch
-            // Same tag pair recreateAudioWithTts resolves, so its loadTts call hits the cache.
-            val loaded = runCatching { onnx.loadTts(language.code) || onnx.loadTts(language.languageTag) }
+            // Prewarm FastPitch + HiFiGAN TTS and Conformer STT so turns hit the loaded session cache
+            val loadedTts = runCatching { onnx.loadTts(language.code) || onnx.loadTts(language.languageTag) }
                 .getOrDefault(false)
-            Log.d("MissionControl", "prewarmTts: '${language.code}' loaded=$loaded")
+            val loadedStt = runCatching { onnx.loadStt(language.languageTag) || onnx.loadStt(language.code) || onnx.loadStt("${language.code}-IN") }
+                .getOrDefault(false)
+            Log.d("MissionControl", "prewarm: '${language.code}' loadedTts=$loadedTts loadedStt=$loadedStt")
         }
     }
 
@@ -3107,6 +3116,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
     fun setSelectedLanguage(language: SupportedLanguage) {
         _uiState.update { it.copy(selectedLanguage = language) }
+        viewModelScope.launch {
+            settingsRepository.setSelectedLanguageCode(language.code)
+        }
         try {
             if (isSystemTtsReady) {
                 systemTts?.language = language.locale

@@ -2,6 +2,7 @@ package com.itantra.app
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -72,8 +73,31 @@ import com.itantra.app.ui.theme.SosRed
 import com.itantra.app.viewmodel.MissionControlViewModel
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+
+    companion object {
+        const val ACTION_EMERGENCY_LOCKSCREEN_SOS = "com.itantra.app.ACTION_EMERGENCY_LOCKSCREEN_SOS"
+        const val EXTRA_LOCKSCREEN_SOS = "extra_lockscreen_sos"
+    }
+
+    private val isLockscreenSosTriggered = mutableStateOf(false)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        checkEmergencyIntent(intent)
+        applyLockscreenVisibility()
+    }
+
+    private fun checkEmergencyIntent(intent: Intent?) {
+        val isEmergency = intent?.getBooleanExtra(EXTRA_LOCKSCREEN_SOS, false) == true ||
+            intent?.action == ACTION_EMERGENCY_LOCKSCREEN_SOS
+        if (isEmergency) {
+            android.util.Log.w("MainActivity", "🚨 Emergency lockscreen SOS intent received!")
+            isLockscreenSosTriggered.value = true
+        }
+    }
+
+    private fun applyLockscreenVisibility() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -81,10 +105,19 @@ class MainActivity : ComponentActivity() {
             @Suppress("DEPRECATION")
             window.addFlags(
                 android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
             )
         }
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            keyguardManager?.requestDismissKeyguard(this, null)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        checkEmergencyIntent(intent)
+        applyLockscreenVisibility()
         enableEdgeToEdge()
         setContent {
             val viewModel: MissionControlViewModel = viewModel()
@@ -109,13 +142,16 @@ class MainActivity : ComponentActivity() {
             }
 
             MyApplicationTheme(darkTheme = isDark) {
-                if (!uiState.isOnboardingCompleted) {
+                if (!uiState.isOnboardingCompleted && !isLockscreenSosTriggered.value) {
                     OnboardingScreen(
                         viewModel = viewModel,
                         onContinue = { /* DataStore auto-updates uiState */ }
                     )
                 } else {
-                    MainAppContent(viewModel = viewModel)
+                    MainAppContent(
+                        viewModel = viewModel,
+                        isLockscreenSosTriggered = isLockscreenSosTriggered.value
+                    )
                 }
             }
         }
@@ -123,7 +159,10 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainAppContent(viewModel: MissionControlViewModel) {
+fun MainAppContent(
+    viewModel: MissionControlViewModel,
+    isLockscreenSosTriggered: Boolean = false
+) {
     val context = LocalContext.current
     val colors = MinimalColorsInstance
 
@@ -214,6 +253,35 @@ fun MainAppContent(viewModel: MissionControlViewModel) {
     val alertCount by viewModel.victimAlertCount.collectAsState()
     val isSosBroadcasting by viewModel.isSosBroadcasting.collectAsState()
     val isRescueActive by viewModel.isRescueActive.collectAsState()
+
+    // If triggered from 5-click lockscreen shortcut, immediately ensure SOS destination and start distress
+    LaunchedEffect(isLockscreenSosTriggered) {
+        if (isLockscreenSosTriggered) {
+            android.util.Log.w("MainActivity", "🚨 Applying Lockscreen SOS UI: destination=SOS, startSos()")
+            currentDestination = MissionDestination.SOS
+            (context as? android.app.Activity)?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (!viewModel.isSosBroadcasting.value) {
+                viewModel.startSos()
+            }
+        }
+    }
+
+    // Auto-close directly back to lockscreen when SOS is turned OFF
+    var wasSosActiveByLockscreen by remember { mutableStateOf(false) }
+    LaunchedEffect(isSosBroadcasting, isLockscreenSosTriggered) {
+        android.util.Log.d("MainActivity", "SOS Lockscreen state update: isLockscreenSosTriggered=$isLockscreenSosTriggered, isSosBroadcasting=$isSosBroadcasting, wasSosActiveByLockscreen=$wasSosActiveByLockscreen")
+        if (isLockscreenSosTriggered && isSosBroadcasting) {
+            wasSosActiveByLockscreen = true
+        } else if (wasSosActiveByLockscreen && !isSosBroadcasting) {
+            // SOS was active and was now cancelled / turned off by user.
+            // Immediately dismiss trigger notification, release keep-screen-on, and close the activity to return straight to the locked lock screen!
+            android.util.Log.w("MainActivity", "🔒 Lockscreen SOS turned off by user. Closing app back to lock screen.")
+            val notifManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
+            notifManager?.cancel(0x505)
+            (context as? android.app.Activity)?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            (context as? android.app.Activity)?.finishAndRemoveTask()
+        }
+    }
 
     // Proactively prompt user to turn on Bluetooth if entering an active mesh mode
     LaunchedEffect(currentDestination, isSosBroadcasting, isRescueActive) {
