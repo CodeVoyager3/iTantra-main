@@ -56,15 +56,22 @@ class AudioPlaybackEngine(context: Context) {
         }
     }
 
-    /** Generates and plays a sine-wave tone. */
+    /** Generates and plays a sine-wave tone with smooth attack and decay. */
     fun playTone(frequencyHz: Float, durationMs: Long, amplitude01: Float) {
         val track = ensureToneTrack() ?: return
         val samples = (TONE_SAMPLE_RATE_HZ * durationMs / 1000L).toInt().coerceAtLeast(1)
         val amp = amplitude01.coerceIn(0f, 1f)
         val pcm = ShortArray(samples)
+        // 8 ms ramp (128 samples at 16 kHz) for smooth attack and decay to prevent clicks/glitches
+        val rampSamples = minOf(128, samples / 2)
         for (i in 0 until samples) {
             val phase = 2.0 * PI * frequencyHz * i / TONE_SAMPLE_RATE_HZ
-            pcm[i] = (sin(phase) * amp * 32767.0).toInt().toShort()
+            val window = when {
+                i < rampSamples -> i.toFloat() / rampSamples
+                i >= samples - rampSamples -> (samples - 1 - i).toFloat() / rampSamples
+                else -> 1.0f
+            }
+            pcm[i] = (sin(phase) * amp * window * 32767.0).toInt().toShort()
         }
         try {
             track.write(shortsToPcmLittleEndian(pcm), 0, pcm.size * 2)
@@ -133,9 +140,8 @@ class AudioPlaybackEngine(context: Context) {
         val am = audioManager ?: return
         try {
             if (speaker) {
-                // Loudspeaker: normal media mode with speakerphone forced on
+                // Loudspeaker: normal media mode
                 am.mode = AudioManager.MODE_NORMAL
-                am.isSpeakerphoneOn = true
             } else {
                 // Earpiece: communication mode with speakerphone off
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -160,6 +166,9 @@ class AudioPlaybackEngine(context: Context) {
             val minBuf = AudioTrack.getMinBufferSize(
                 sampleRateHz, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
             )
+            // Buffer size: at least 1 full second of audio or minBuf * 4, aligned to 2 bytes
+            val rawBuf = maxOf(minBuf * 4, sampleRateHz * 2)
+            val bufferSize = rawBuf + (rawBuf % 2)
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -177,7 +186,7 @@ class AudioPlaybackEngine(context: Context) {
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .build()
                 )
-                .setBufferSizeInBytes(maxOf(minBuf * 2, sampleRateHz / 10)) // ~100 ms
+                .setBufferSizeInBytes(bufferSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             track.setVolume(volume)
@@ -202,6 +211,8 @@ class AudioPlaybackEngine(context: Context) {
             val minBuf = AudioTrack.getMinBufferSize(
                 TONE_SAMPLE_RATE_HZ, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
             )
+            // Buffer size: at least 500ms of audio (16,000 bytes) to prevent underruns on all chipsets
+            val bufferSize = maxOf(minBuf * 4, TONE_SAMPLE_RATE_HZ)
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -216,7 +227,7 @@ class AudioPlaybackEngine(context: Context) {
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .build()
                 )
-                .setBufferSizeInBytes(maxOf(minBuf * 2, TONE_SAMPLE_RATE_HZ / 10))
+                .setBufferSizeInBytes(bufferSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             track.setVolume(volume)

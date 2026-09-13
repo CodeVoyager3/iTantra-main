@@ -60,7 +60,11 @@ import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.filled.Wifi
@@ -110,6 +114,9 @@ import com.itantra.app.ui.theme.BadgeMintContainer
 import com.itantra.app.ui.theme.BadgeMintText
 import com.itantra.app.ui.theme.MeshGreen
 import com.itantra.app.ui.theme.MeshGreenText
+import com.itantra.app.ui.theme.RescueAmber
+import com.itantra.app.ui.theme.RescueAmberContainer
+import com.itantra.app.ui.theme.RescueAmberText
 import com.itantra.app.ui.theme.minimalColors
 import com.itantra.app.ui.theme.SosRed
 import com.itantra.app.ui.theme.SosRedDark
@@ -154,6 +161,8 @@ fun SosDistressScreen(
     // A rescuer streaming a strictly one-way announcement: this device is a
     // receive-only endpoint, so it must not present talk affordances.
     val isReceivingOneWayBroadcast by viewModel.isReceivingOneWayBroadcast.collectAsState()
+    val isMicMuted by viewModel.isMicMuted.collectAsState()
+    val isSpeakerphoneOn by viewModel.isSpeakerphoneOn.collectAsState()
 
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -838,23 +847,47 @@ fun SosDistressScreen(
                     }
                 }
 
-                // Live Connected Rescuer Tile
-                if (connectedRescuer != null) {
-                    val rescuer = connectedRescuer!!
+                // =====================================================
+                // LIVE RESCUER CALL / 1-WAY BROADCAST CONSOLE CARD
+                // =====================================================
+                if (connectedRescuer != null || isReceivingOneWayBroadcast) {
+                    val rescuer = connectedRescuer
+                    val isBroadcast = isReceivingOneWayBroadcast
+
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .shadow(elevation = 3.dp, shape = RoundedCornerShape(22.dp), spotColor = MeshGreen.copy(alpha = 0.2f))
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(Color(0xFFECFDF5), Color(0xFFF0FDF4))
-                                )
+                            .shadow(
+                                elevation = 3.dp,
+                                shape = RoundedCornerShape(22.dp),
+                                spotColor = if (isBroadcast) RescueAmber.copy(alpha = 0.25f) else MeshGreen.copy(alpha = 0.25f)
                             )
-                            .border(1.5.dp, MeshGreen, RoundedCornerShape(22.dp))
+                            .clip(RoundedCornerShape(22.dp))
+                            .then(
+                                if (isBroadcast) {
+                                    Modifier.background(
+                                        if (colors.isDark) Color(0xFF451A03).copy(alpha = 0.35f)
+                                        else Color(0xFFFFFBEB)
+                                    )
+                                } else {
+                                    if (colors.isDark) {
+                                        Modifier.background(Color(0xFF064E3B).copy(alpha = 0.35f))
+                                    } else {
+                                        Modifier.background(
+                                            Brush.linearGradient(listOf(Color(0xFFECFDF5), Color(0xFFF0FDF4)))
+                                        )
+                                    }
+                                }
+                            )
+                            .border(
+                                1.5.dp,
+                                if (isBroadcast) RescueAmber else MeshGreen,
+                                RoundedCornerShape(22.dp)
+                            )
                             .padding(16.dp)
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            // Header Row: Rescuer Info / Broadcast Title + Status Badge
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -868,11 +901,11 @@ fun SosDistressScreen(
                                         modifier = Modifier
                                             .size(42.dp)
                                             .clip(CircleShape)
-                                            .background(MeshGreen),
+                                            .background(if (isBroadcast) RescueAmber else MeshGreen),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Default.HeadsetMic,
+                                            imageVector = if (isBroadcast) Icons.Default.Campaign else Icons.Default.HeadsetMic,
                                             contentDescription = null,
                                             tint = Color.White,
                                             modifier = Modifier.size(22.dp)
@@ -881,61 +914,251 @@ fun SosDistressScreen(
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column {
                                         Text(
-                                            text = "RESCUER CONNECTED",
+                                            text = if (isBroadcast) "EMERGENCY BROADCAST" else "RESCUER CONNECTED",
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = MeshGreenText,
+                                            color = if (isBroadcast) RescueAmberText else MeshGreenText,
                                             letterSpacing = 0.8.sp
                                         )
                                         Text(
-                                            text = rescuer.callsign,
+                                            text = rescuer?.callsign ?: "Rescuer Megaphone",
                                             fontSize = 16.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = Color(0xFF0F172A)
+                                            color = colors.textPrimary
                                         )
                                         Text(
-                                            text = "${rescuer.role} • ~${rescuer.distanceMeters}m away",
+                                            text = if (isBroadcast) {
+                                                "1-Way Announcement • Listen Only"
+                                            } else {
+                                                "${rescuer?.role ?: "iTantra Rescuer"} • ~${rescuer?.distanceMeters ?: 1}m away"
+                                            },
                                             fontSize = 12.sp,
-                                            color = Color(0xFF64748B)
+                                            color = colors.textSecondary
                                         )
                                     }
                                 }
 
-                                // Live Waveform Visualizer
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(MeshGreen)
-                                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                                ) {
-                                    Box(modifier = Modifier.width(3.dp).height(waveBar1.dp).background(Color.White, RoundedCornerShape(2.dp)))
-                                    Box(modifier = Modifier.width(3.dp).height(waveBar2.dp).background(Color.White, RoundedCornerShape(2.dp)))
-                                    Box(modifier = Modifier.width(3.dp).height(waveBar3.dp).background(Color.White, RoundedCornerShape(2.dp)))
-                                    Box(modifier = Modifier.width(3.dp).height(waveBar4.dp).background(Color.White, RoundedCornerShape(2.dp)))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "LIVE",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White
-                                    )
+                                // Status Badge
+                                if (isBroadcast) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(RescueAmber)
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                    ) {
+                                        Text(
+                                            text = "ON AIR",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
+                                } else {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MeshGreen)
+                                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    ) {
+                                        Box(modifier = Modifier.width(3.dp).height(waveBar1.dp).background(Color.White, RoundedCornerShape(2.dp)))
+                                        Box(modifier = Modifier.width(3.dp).height(waveBar2.dp).background(Color.White, RoundedCornerShape(2.dp)))
+                                        Box(modifier = Modifier.width(3.dp).height(waveBar3.dp).background(Color.White, RoundedCornerShape(2.dp)))
+                                        Box(modifier = Modifier.width(3.dp).height(waveBar4.dp).background(Color.White, RoundedCornerShape(2.dp)))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "LIVE",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
                                 }
                             }
 
-                            // Digital Gray-Line Audio Visualizer for the Rescuer Intercom
-                            Spacer(modifier = Modifier.height(6.dp))
+                            // 1-Way Broadcast Information Banner (if receiving broadcast)
+                            if (isBroadcast) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (colors.isDark) Color(0xFF451A03) else Color(0xFFFEF3C7))
+                                        .border(1.dp, RescueAmber.copy(alpha = 0.8f), RoundedCornerShape(10.dp))
+                                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.MicOff,
+                                            contentDescription = null,
+                                            tint = RescueAmberText,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Column {
+                                            Text(
+                                                text = "1-WAY RESCUER BROADCAST — REPLIES DISABLED",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (colors.isDark) Color(0xFFFDE68A) else Color(0xFF92400E)
+                                            )
+                                            Text(
+                                                text = "Rescuer is broadcasting megaphone announcements to all victims. Your mic is locked & muted.",
+                                                fontSize = 11.sp,
+                                                color = if (colors.isDark) Color(0xFFFDE68A) else Color(0xFF92400E),
+                                                lineHeight = 15.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Digital Gray-Line Audio Visualizer
                             DigitalAudioVisualizer(
                                 audioLevel = audioLevel,
                                 isActive = true,
-                                label = if (isReceivingOneWayBroadcast) {
+                                label = if (isBroadcast) {
                                     "RESCUER 1-WAY BROADCAST (RECEIVE ONLY)"
                                 } else {
                                     "RESCUER 2-WAY AUDIO LINK"
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             )
+
+                            // Divider
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(1.dp)
+                                    .background(
+                                        if (isBroadcast) RescueAmber.copy(alpha = 0.3f)
+                                        else MeshGreen.copy(alpha = 0.3f)
+                                    )
+                            )
+
+                            // Hands-Free Audio Controls Row (Big Mic, Big Speaker, Big Disconnect)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // 1. Big Mic Mute / Unmute Button (58dp)
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Surface(
+                                        onClick = {
+                                            if (!isBroadcast) {
+                                                viewModel.toggleMicMute()
+                                            }
+                                        },
+                                        enabled = !isBroadcast,
+                                        shape = CircleShape,
+                                        color = when {
+                                            isBroadcast -> if (colors.isDark) Color(0xFF334155) else Color(0xFFE2E8F0)
+                                            isMicMuted -> if (colors.isDark) Color(0xFF450A0A) else Color(0xFFFEE2E2)
+                                            else -> colors.surface
+                                        },
+                                        shadowElevation = if (isBroadcast) 0.dp else 3.dp,
+                                        modifier = Modifier.size(58.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isBroadcast || isMicMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                                                contentDescription = "Mute Mic",
+                                                tint = when {
+                                                    isBroadcast -> colors.textSecondary
+                                                    isMicMuted -> SosRedDark
+                                                    else -> colors.textPrimary
+                                                },
+                                                modifier = Modifier.size(26.dp)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = when {
+                                            isBroadcast -> "Mic Locked"
+                                            isMicMuted -> "Unmute"
+                                            else -> "Mute Mic"
+                                        },
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = when {
+                                            isBroadcast -> colors.textSecondary
+                                            isMicMuted -> SosRedDark
+                                            else -> colors.textSecondary
+                                        }
+                                    )
+                                }
+
+                                // 2. Big Speakerphone Toggle Button (58dp)
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Surface(
+                                        onClick = { viewModel.toggleSpeakerphone() },
+                                        shape = CircleShape,
+                                        color = if (isSpeakerphoneOn) AccentBlueContainer else colors.surface,
+                                        shadowElevation = 3.dp,
+                                        modifier = Modifier.size(58.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isSpeakerphoneOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.Default.Hearing,
+                                                contentDescription = "Speaker",
+                                                tint = if (isSpeakerphoneOn) AccentBlue else colors.textPrimary,
+                                                modifier = Modifier.size(26.dp)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = if (isSpeakerphoneOn) "Speaker" else "Earpiece",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (isSpeakerphoneOn) AccentBlue else colors.textSecondary
+                                    )
+                                }
+
+                                // 3. Big Disconnect Button (58dp)
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Surface(
+                                        onClick = {
+                                            if (!isBroadcast) {
+                                                viewModel.disconnectConnectedRescuer()
+                                            }
+                                        },
+                                        enabled = !isBroadcast,
+                                        shape = CircleShape,
+                                        color = if (isBroadcast) (if (colors.isDark) Color(0xFF334155) else Color(0xFFE2E8F0)) else SosRed,
+                                        shadowElevation = if (isBroadcast) 0.dp else 4.dp,
+                                        modifier = Modifier.size(58.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isBroadcast) Icons.Default.Hearing else Icons.Default.CallEnd,
+                                                contentDescription = if (isBroadcast) "Listen Only" else "Disconnect",
+                                                tint = if (isBroadcast) colors.textSecondary else Color.White,
+                                                modifier = Modifier.size(26.dp)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = if (isBroadcast) "Listen Only" else "End Call",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isBroadcast) colors.textSecondary else SosRedDark
+                                    )
+                                }
+                            }
                         }
                     }
                 }

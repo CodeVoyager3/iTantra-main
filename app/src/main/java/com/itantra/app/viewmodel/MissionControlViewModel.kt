@@ -26,7 +26,9 @@ import com.itantra.app.ai.OnnxInferenceManager
 import com.itantra.app.audio.AudioCaptureEngine
 import com.itantra.app.audio.AudioPlaybackEngine
 import com.itantra.app.audio.LiveAudioWindow
+import com.itantra.app.audio.VoiceCaptureGate
 import com.itantra.app.audio.VoiceStreamGate
+import com.itantra.app.audio.VoiceTurnCoordinator
 import com.itantra.app.audio.shortsToPcmLittleEndian
 import com.itantra.app.data.SettingsRepository
 import com.itantra.app.data.VoiceMessageEntity
@@ -169,6 +171,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     /** Decides which captured frames go on the air and owns the frame sequence. */
     private val voiceStreamGate = VoiceStreamGate()
 
+    /** Coordinates voice turn lifecycle, 8s force-flush ceiling, and 200ms noise threshold. */
+    private val voiceTurnCoordinator = VoiceTurnCoordinator()
+
     /** Tracks recent live VOICE_FRAME arrivals so TTS does not double the audio. */
     private val liveAudioWindow = LiveAudioWindow()
 
@@ -291,6 +296,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
     private val _connectedRescuer = MutableStateFlow<RescuerNode?>(null)
     val connectedRescuer: StateFlow<RescuerNode?> = _connectedRescuer.asStateFlow()
+    private var lastExplicitDisconnectEpochMs = 0L
 
     /** Real battery percentage via BatteryManager (defaults to 100 when unknown). */
     private fun currentBatteryPercent(): Int {
@@ -430,8 +436,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         // Loud siren beacon (+ localized TTS announcement when installed).
         startAudioBeacon(_uiState.value.selectedLanguage)
 
-        // Ensure voice capture is actively listening so victim can speak at any time
-        startMeshVoiceCapture()
+        // Voice capture only engages if a rescuer has actively linked to this victim
+        syncVoiceCaptureState()
     }
 
     fun stopSos() {
@@ -447,8 +453,32 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         wifiDirectMeshManager?.removeGroup()
         stopBleScanIfIdle()
         stopMeshUdpIfIdle()
-        stopMeshVoiceCaptureIfIdle()
+        syncVoiceCaptureState()
         syncBeaconAdvertising()
+    }
+
+    /**
+     * Disconnects the victim from the active rescuer intercom.
+     * Notifies the rescuer via UDP mesh and returns this victim to silent SOS standby.
+     */
+    fun disconnectConnectedRescuer() {
+        lastExplicitDisconnectEpochMs = System.currentTimeMillis()
+        val rescuer = _connectedRescuer.value
+        if (rescuer != null) {
+            val rescuerNodeId = rescuer.id.removePrefix("resc-").toLongOrNull()
+            if (rescuerNodeId != null) {
+                val close = ItantraPacket(
+                    nodeId = _nodeId.value,
+                    ttl = _meshHopLimit.value,
+                    msgType = PacketFraming.MSG_TYPE_VOICE_LINK_CLOSE,
+                    payload = ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(rescuerNodeId).array()
+                )
+                broadcastMeshPacket(PacketFraming.encode(close), rescuerNodeId)
+            }
+        }
+        _connectedRescuer.value = null
+        _isReceivingOneWayBroadcast.value = false
+        syncVoiceCaptureState()
     }
 
     fun isBluetoothEnabled(): Boolean = bleMeshManager?.isBluetoothEnabled() ?: false
@@ -532,7 +562,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     fun toggleWalkieMaster(active: Boolean) {
         _isWalkieActive.value = active
         if (active) {
-            startMeshVoiceCapture()
+            syncVoiceCaptureState()
             wifiDirectMeshManager?.startDiscovery()
             wifiDirectMeshManager?.startUdpBroadcast()
             bleMeshManager?.startScanning() // BLE peers also appear as walkie nodes
@@ -546,7 +576,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             )
         } else {
             wifiDirectMeshManager?.stopDiscovery()
-            stopMeshVoiceCaptureIfIdle()
+            syncVoiceCaptureState()
             stopMeshUdpIfIdle()
             stopBleScanIfIdle()
             syncBeaconAdvertising()
@@ -554,14 +584,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _isTransmitting.value = false
             _isVadSpeaking.value = false
             _vadStatus.value = VadStatus.SILENCE
-            _audioLevel.value = 0f
-            _speechProbability.value = 0f
-            _isWalkieLinkActive.value = false
-            _isReceivingAudio.value = false
-            _remoteAudioLevel.value = 0f
-            liveAudioWindow.clear()
-            peerAddressBook.clear()
-            logVoice("walkie", "mesh OFF: presence beacon stopped")
+            _uiState.update { it.copy(channelState = RadioChannelState.STANDBY).clearStatus() }
+            updateWalkieLinkState()
         }
     }
 
@@ -603,6 +627,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
         logVoice("send", "PTT up: transcript turn flushed")
         flushVoiceTurn()
+        syncVoiceCaptureState()
     }
 
     fun setWalkieChannel(channel: Int) {
@@ -715,7 +740,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             bleMeshManager?.startScanning()
             syncBeaconAdvertising()
             wifiDirectMeshManager?.startUdpBroadcast()
-            startMeshVoiceCapture()
+            syncVoiceCaptureState() // Radar scanning: mic stays OFF until call or broadcast is initiated
         } else {
             _connectedVictimIntercom.value = null
             _isBroadcastingToAll.value = false
@@ -726,7 +751,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _victimAlertCount.value = 0
             _isReceivingOneWayBroadcast.value = false
             beaconFirstSeen.clear()
-            stopMeshVoiceCaptureIfIdle()
+            syncVoiceCaptureState()
             stopMeshUdpIfIdle()
             _modelWarningMessage.value = null
             stopBleScanIfIdle()
@@ -748,15 +773,15 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _rescueConnectionMode.value = RescueConnectionMode.BROADCAST_ALL
             wifiDirectMeshManager?.startUdpBroadcast()
             syncBeaconAdvertising()
-            startMeshVoiceCapture()
+            syncVoiceCaptureState()
             // 1-way megaphone: a fresh frame sequence for this announcement.
             voiceStreamGate.beginTurn()
-            logVoice("send", "1-way broadcast ON: live voice frames + STT text both streaming")
+            logVoice("send", "1-way broadcast ON: megaphone announcement active")
         } else {
             _modelWarningMessage.value = null
             _rescueConnectionMode.value = RescueConnectionMode.STANDBY
             syncBeaconAdvertising()
-            stopMeshVoiceCaptureIfIdle()
+            syncVoiceCaptureState()
             stopMeshUdpIfIdle()
         }
     }
@@ -786,7 +811,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         wifiDirectMeshManager?.startUdpBroadcast()
         logVoice("send", "voice-link request -> ${nodeCallsign(victim.nodeId)} (nodeId=${victim.nodeId})")
         broadcastMeshPacket(PacketFraming.encode(linkRequest), victim.nodeId)
-        startMeshVoiceCapture()
+        syncVoiceCaptureState()
     }
 
     fun disconnectVictimIntercom() {
@@ -804,7 +829,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         _modelWarningMessage.value = null
         _rescueConnectionMode.value = RescueConnectionMode.STANDBY
         syncBeaconAdvertising()
-        stopMeshVoiceCaptureIfIdle()
+        syncVoiceCaptureState()
         stopMeshUdpIfIdle()
     }
 
@@ -1164,19 +1189,20 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 it.altitudeMeters == DistressBeaconPayload.ALTITUDE_RESCUER_BROADCAST_ALL ||
                     it.altitudeMeters == myTargetMask
             }
-            if (callingRescuer != null) {
+            val recentlyExplicitlyDisconnected = System.currentTimeMillis() - lastExplicitDisconnectEpochMs < 5000L
+            if (callingRescuer != null && !recentlyExplicitlyDisconnected) {
                 val node = callingRescuer.toRescuerNode().copy(isConnected = true)
                 _connectedRescuer.value = node
                 _isReceivingOneWayBroadcast.value =
                     callingRescuer.altitudeMeters == DistressBeaconPayload.ALTITUDE_RESCUER_BROADCAST_ALL
                 lastRescuerContactEpochMs = System.currentTimeMillis()
-                startMeshVoiceCapture()
+                syncVoiceCaptureState()
             } else if (_connectedRescuer.value != null) {
                 // If neither BLE beacon nor recent UDP contact in the last 4 seconds, mark disconnected
                 if (System.currentTimeMillis() - lastRescuerContactEpochMs > 4000L) {
                     _connectedRescuer.value = null
                     _isReceivingOneWayBroadcast.value = false
-                    stopMeshVoiceCaptureIfIdle()
+                    syncVoiceCaptureState()
                 }
             } else {
                 _isReceivingOneWayBroadcast.value = false
@@ -1325,9 +1351,17 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 logVoice("decode", "text from ${nodeCallsign(packet.nodeId)} (lang=$langCode): '$text'")
 
                 if (text.isNotBlank()) {
-                    // If live audio from this node is arriving, the audio channel
-                    // already reproduced the voice — do not speak it again.
-                    val hasLiveAudio = liveAudioWindow.hasRecentAudio(packet.nodeId, now)
+                    // Only play voice and enter RECEIVING state if our local mode allows it
+                    if (!shouldPlayIncomingVoiceText(packet.nodeId)) {
+                        logVoice(
+                            "rx",
+                            "ignored voice text from ${nodeCallsign(packet.nodeId)}: local state not in active call/broadcast " +
+                                "(walkie=${_isWalkieActive.value}, rescuerCall=${_connectedVictimIntercom.value?.nodeId}, " +
+                                "victimCall=${_connectedRescuer.value?.id}, broadcast=${_isReceivingOneWayBroadcast.value})"
+                        )
+                        return
+                    }
+
                     viewModelScope.launch(Dispatchers.Main) {
                         _uiState.update {
                             it.copy(
@@ -1354,13 +1388,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                         "transcript + log updated from ${nodeCallsign(packet.nodeId)} (channelState=RECEIVING)"
                     )
 
-                    if (hasLiveAudio) {
-                        logVoice("tts", "skipped: live VOICE_FRAME audio from ${nodeCallsign(packet.nodeId)} is active")
-                    } else {
-                        logVoice("tts", "speaking text with TTS (no recent live audio from ${nodeCallsign(packet.nodeId)})")
-                        // Re-create audio locally on receiver using TTS!
-                        recreateAudioWithTts(text, langCode)
-                    }
+                    logVoice("tts", "speaking text with TTS from ${nodeCallsign(packet.nodeId)}")
+                    // Re-create audio locally on receiver using TTS (low-bitrate text-only mesh)
+                    recreateAudioWithTts(text, langCode)
                 }
             }
             PacketFraming.MSG_TYPE_VOICE_FRAME -> {
@@ -1397,7 +1427,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                         )
                     // Auto-engage victim microphone: ambient sounds and victim's voice
                     // are captured, transcribed via STT, and broadcast as text!
-                    startMeshVoiceCapture()
+                    syncVoiceCaptureState()
 
                     // Send ACK back to rescuer
                     val ackPacket = ItantraPacket(
@@ -1421,7 +1451,13 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             PacketFraming.MSG_TYPE_VOICE_LINK_CLOSE -> {
                 if (_connectedRescuer.value?.id == "resc-${packet.nodeId}") {
                     _connectedRescuer.value = null
-                    stopMeshVoiceCaptureIfIdle()
+                    syncVoiceCaptureState()
+                }
+                if (_connectedVictimIntercom.value?.nodeId == packet.nodeId) {
+                    _connectedVictimIntercom.value = null
+                    _rescueConnectionMode.value = RescueConnectionMode.STANDBY
+                    syncBeaconAdvertising()
+                    syncVoiceCaptureState()
                 }
             }
         }
@@ -1479,27 +1515,18 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         voiceFrameSenderJob
 
         capture.onFrame = { frame ->
-            // 1. Live channel: wrap each 20 ms frame and put it on the air
-            //    (Walkie mesh / Rescue 1-way megaphone while transmitting).
-            if (voiceStreamGate.shouldStream(
-                    isWalkieActive = _isWalkieActive.value,
-                    isBroadcastingToAll = _isBroadcastingToAll.value,
-                    isMicMuted = _isMicMuted.value,
-                    isVadSpeaking = _isVadSpeaking.value,
-                    isTransmitting = _isTransmitting.value,
-                    isPttActive = _isPttActive.value
-                )
-            ) {
-                enqueueVoiceFrame(frame)
-            }
-            // 2. Resilience channel: accumulate the turn for on-device STT.
+            // Low-bitrate text-only mesh: speech frames accumulate locally for on-device STT.
             if (!_isMicMuted.value && _isVadSpeaking.value) {
+                val currentSize: Int
                 synchronized(voiceTurnBuffer ?: this) {
                     voiceTurnBuffer?.write(frame, 0, frame.size)
+                    currentSize = voiceTurnBuffer?.size() ?: 0
                 }
-                // Cap at 4.0 seconds of continuous speech for responsive turn-taking (128,000 bytes)
-                if ((voiceTurnBuffer?.size() ?: 0) >= AudioCaptureEngine.SAMPLE_RATE_HZ * 2 * 4) {
+                // Force-flush ceiling (8.0 seconds of continuous speech) for long monologues
+                if (voiceTurnCoordinator.shouldForceFlush(currentSize)) {
+                    logVoice("turn", "force-flushing 8s continuous speech turn ($currentSize bytes)")
                     flushVoiceTurn()
+                    voiceTurnCoordinator.onSpeechStarted()
                 }
             }
         }
@@ -1508,8 +1535,10 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _vadStatus.value = if (speaking) VadStatus.SPEECH_DETECTED else VadStatus.SILENCE
             _isTransmitting.value = speaking && !_isMicMuted.value
             if (speaking) {
-                // A new speaking turn restarts the live frame sequence.
+                voiceTurnCoordinator.onSpeechStarted()
                 voiceStreamGate.beginTurn()
+            } else {
+                voiceTurnCoordinator.onSpeechEnded()
             }
             _uiState.update { state ->
                 val next = state.copy(
@@ -1525,11 +1554,22 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         capture.onLevelChanged = { level -> _audioLevel.value = level }
         capture.onSpeechProbability = { prob -> _speechProbability.value = prob }
         capture.onEndOfTurn = {
-            _uiState.update { state ->
-                val next = state.copy(channelState = RadioChannelState.STANDBY)
-                if (next.voiceStatus != null) next.withStatus(VoiceStatus.TRANSCRIBING) else next
+            val bufferSize = synchronized(voiceTurnBuffer ?: this) { voiceTurnBuffer?.size() ?: 0 }
+            val action = voiceTurnCoordinator.evaluateTurn(bufferSize)
+            if (action == VoiceTurnCoordinator.TurnAction.FLUSH_STT) {
+                _uiState.update { state ->
+                    val next = state.copy(channelState = RadioChannelState.STANDBY)
+                    if (next.voiceStatus != null) next.withStatus(VoiceStatus.TRANSCRIBING) else next
+                }
+                flushVoiceTurn()
+            } else {
+                // Discard noise (< 200ms) quietly without UI flicker
+                synchronized(voiceTurnBuffer ?: this) {
+                    voiceTurnBuffer?.reset()
+                }
+                _uiState.update { it.copy(channelState = RadioChannelState.STANDBY).clearStatus() }
+                logVoice("stt", "discarded short noise transient ($bufferSize bytes < ${voiceTurnCoordinator.minTurnBytes})")
             }
-            flushVoiceTurn()
         }
         if (!capture.start()) {
             Log.w(voicePipelineTag, "[mic] capture did not start (RECORD_AUDIO missing or no input device)")
@@ -1603,19 +1643,57 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    /**
+     * Strict policy engine for when microphone capture is permitted.
+     * Mic is strictly STOPPED during Rescue radar scanning, SOS standby, and idle states.
+     */
+    private fun isVoiceCaptureNeeded(): Boolean {
+        return VoiceCaptureGate.isCaptureNeeded(
+            isPttActive = _isPttActive.value,
+            isWalkieActive = _isWalkieActive.value,
+            isBroadcastingToAll = _isBroadcastingToAll.value,
+            hasConnectedVictimIntercom = _connectedVictimIntercom.value != null,
+            isSosBroadcasting = _isSosBroadcasting.value,
+            hasConnectedRescuer = _connectedRescuer.value != null,
+            isReceivingOneWayBroadcast = _isReceivingOneWayBroadcast.value
+        )
+    }
+
+    /**
+     * Synchronizes audio capture state with the active mission connection mode.
+     */
+    private fun syncVoiceCaptureState() {
+        if (isVoiceCaptureNeeded()) {
+            startMeshVoiceCapture()
+        } else {
+            stopMeshVoiceCaptureIfIdle()
+        }
+    }
+
     private fun stopMeshVoiceCaptureIfIdle() {
-        val needed = _isWalkieActive.value ||
-            _isBroadcastingToAll.value ||
-            _connectedVictimIntercom.value != null ||
-            _isSosBroadcasting.value ||
-            _isRescueActive.value ||
-            _isPttActive.value
-        if (!needed) {
+        if (!isVoiceCaptureNeeded()) {
             audioCaptureEngine?.stop()
             synchronized(voiceTurnBuffer ?: this) {
                 voiceTurnBuffer = null
             }
         }
+    }
+
+    /**
+     * Gating for inbound text playback: ensures the phone only plays voice through
+     * the loudspeaker when the local mode expects voice (active call, broadcast, or walkie).
+     */
+    private fun shouldPlayIncomingVoiceText(senderNodeId: Long): Boolean {
+        val rescuerNodeId = _connectedRescuer.value?.id?.removePrefix("resc-")?.toLongOrNull()
+        return VoiceCaptureGate.shouldPlayIncomingVoice(
+            isWalkieActive = _isWalkieActive.value,
+            isRescueActive = _isRescueActive.value,
+            connectedVictimNodeId = _connectedVictimIntercom.value?.nodeId,
+            isSosBroadcasting = _isSosBroadcasting.value,
+            connectedRescuerNodeId = rescuerNodeId,
+            isReceivingOneWayBroadcast = _isReceivingOneWayBroadcast.value,
+            senderNodeId = senderNodeId
+        )
     }
 
     /**
@@ -1630,9 +1708,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             pcmBytes = buffer.toByteArray()
             buffer.reset()
         }
-        // Discard only tiny clicks (< 100ms of audio = 3200 bytes)
-        if (pcmBytes.size < 3200) {
-            Log.d(voicePipelineTag, "[stt] discarded click turn (<100ms, ${pcmBytes.size} bytes)")
+        // Discard turns below minimum speech threshold (200ms = 6400 bytes)
+        if (pcmBytes.size < voiceTurnCoordinator.minTurnBytes) {
+            logVoice("stt", "discarded turn below threshold (<200ms, ${pcmBytes.size} bytes)")
             viewModelScope.launch(Dispatchers.Main) {
                 if (_uiState.value.voiceStatus != null) {
                     _uiState.update { it.copy(currentTranscript = "").clearStatus() }
@@ -1782,9 +1860,16 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private fun recreateAudioWithTts(text: String, langCode: String) {
         ttsPlaybackJob?.cancel()
         ttsPlaybackJob = viewModelScope.launch(Dispatchers.Default) {
-            val onnx = onnxInferenceManager
-            var playedOnnx = false
+            // 1. Google Speech Services / System TTS provides crystal-clear neural voice across all Android versions
+            if (isSystemTtsReady) {
+                withContext(Dispatchers.Main) {
+                    speakWithSystemTts(text, langCode)
+                }
+                return@launch
+            }
 
+            // 2. Fallback to OnnxInferenceManager TTS if system TTS is not ready
+            val onnx = onnxInferenceManager
             if (onnx != null && modelStorageManager.isInstalled(langCode)) {
                 try {
                     val loaded = onnx.loadTts(langCode) || onnx.loadTts("${langCode}-IN")
@@ -1806,18 +1891,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                             withContext(Dispatchers.Main) {
                                 _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                             }
-                            playedOnnx = true
                         }
                     }
-                } catch (_: Exception) {
-                    playedOnnx = false
-                }
-            }
-
-            if (!playedOnnx) {
-                withContext(Dispatchers.Main) {
-                    speakWithSystemTts(text, langCode)
-                }
+                } catch (_: Exception) {}
             }
         }
     }
@@ -1829,12 +1905,11 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
         val audioManager = getApplication<Application>().getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         try {
-            audioManager?.isSpeakerphoneOn = true
-            audioManager?.mode = AudioManager.MODE_NORMAL
-            // Force maximum volume for emergency audio
-            val maxVol = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 0
-            if (maxVol > 0) {
-                audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, maxVol, 0)
+            if (_isSpeakerphoneOn.value) {
+                audioManager?.mode = AudioManager.MODE_NORMAL
+            } else {
+                audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager?.isSpeakerphoneOn = false
             }
             val targetLocale = SupportedLanguage.fromCode(langCode).locale
             val langResult = tts.setLanguage(targetLocale)
@@ -2319,14 +2394,25 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
     private fun initSystemTts() {
         try {
-            systemTts = TextToSpeech(getApplication()) { status ->
+            // Prefer Google Speech Services for crisp, studio-quality neural voice across all OEMs (Samsung, Pixel, etc.)
+            val googleEngine = "com.google.android.tts"
+            val pm = getApplication<Application>().packageManager
+            val isGoogleTtsInstalled = try {
+                pm.getPackageInfo(googleEngine, 0)
+                true
+            } catch (_: Exception) {
+                false
+            }
+            val preferredEngine = if (isGoogleTtsInstalled) googleEngine else null
+
+            systemTts = TextToSpeech(getApplication(), { status ->
                 if (status == TextToSpeech.SUCCESS) {
                     isSystemTtsReady = true
                     try {
                         systemTts?.language = _uiState.value.selectedLanguage.locale
                     } catch (_: Exception) {}
                 }
-            }
+            }, preferredEngine)
         } catch (_: Exception) {}
     }
 

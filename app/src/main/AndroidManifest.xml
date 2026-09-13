@@ -39,6 +39,14 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
 
+    <!-- Queries required on Android 11+ (API 30+) to discover and bind to Google Speech Services / TTS engines -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <package android:name="com.google.android.tts" />
+    </queries>
+
     <application
         android:name="com.itantra.app.iTantraApplication"
         android:allowBackup="true"

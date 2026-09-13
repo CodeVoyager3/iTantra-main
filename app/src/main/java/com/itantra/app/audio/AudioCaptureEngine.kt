@@ -33,8 +33,8 @@ class AudioCaptureEngine(context: Context) {
         const val FRAME_BYTES = SAMPLE_RATE_HZ * 2 * FRAME_MS / 1000 // 640
         const val FRAME_SHORTS = FRAME_BYTES / 2 // 320
 
-        /** Margin (dB) above the noise floor required to trigger speech (4.5 dB for near-mic speech). */
-        private const val SPEECH_TRIGGER_DB = 4.5
+        /** Margin (dB) above the noise floor required to trigger speech (5.0 dB for near-mic speech). */
+        private const val SPEECH_TRIGGER_DB = 5.0
 
         /** Number of consecutive loud frames before speech is declared (~40ms). */
         private const val SPEECH_TRIGGER_FRAMES = 2
@@ -42,11 +42,11 @@ class AudioCaptureEngine(context: Context) {
         /** Margin (dB) below which speech is considered ended (3.5 dB ensures fan noise doesn't lock VAD). */
         private const val SPEECH_RELEASE_DB = 3.5
 
-        /** Silence duration (ms) before an end-of-turn event fires (800ms for natural speech pauses). */
-        private const val END_OF_TURN_MS = 800L
+        /** Silence duration (ms) before an end-of-turn event fires (400ms for snappy natural speech pauses). */
+        private const val END_OF_TURN_MS = 400L
 
-        /** Number of 20ms frames (~200ms) kept in ring buffer to preserve leading phonemes. */
-        private const val PRE_SPEECH_FRAMES = 10
+        /** Number of 20ms frames (~100ms) kept in ring buffer to preserve leading phonemes. */
+        private const val PRE_SPEECH_FRAMES = 5
 
         /** Floor for the adaptive noise estimate, in raw RMS units. */
         private const val MIN_NOISE_FLOOR = 20.0

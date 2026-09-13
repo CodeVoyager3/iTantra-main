@@ -34,8 +34,11 @@ class VoiceStreamGate {
     fun nextSequence(): Int = sequence++
 
     /**
-     * @return true when the frame captured right now must be wrapped in a
-     * `VoiceFrame` and broadcast.
+     * In accordance with the low-bitrate mesh transceiver requirement (ISRO PS),
+     * raw audio streaming over the mesh is decommissioned. All communication
+     * is strictly lightweight text packets synthesized locally by receiver TTS.
+     *
+     * @return false always to prevent raw PCM frames from being placed on the network.
      */
     fun shouldStream(
         isWalkieActive: Boolean,
@@ -45,9 +48,7 @@ class VoiceStreamGate {
         isTransmitting: Boolean,
         isPttActive: Boolean
     ): Boolean {
-        if (isMicMuted) return false
-        if (isWalkieActive) return isVadSpeaking || isTransmitting || isPttActive
-        if (isBroadcastingToAll) return true
+        // Enforce pure text-only mesh: no raw 256kbps PCM audio on ad-hoc links.
         return false
     }
 }
