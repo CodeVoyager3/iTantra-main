@@ -22,6 +22,17 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("debug")
         }
+        // Sideload / tester build: a distinct applicationId so the APK installs
+        // on any phone, even one that already has an iTantra build signed with a
+        // different key (otherwise: "App not installed as package conflicts with
+        // an existing package"). Build with: gradlew :app:assembleSideload
+        create("sideload") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".test"
+            versionNameSuffix = "-test"
+            resValue("string", "app_name", "iTantra Test")
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     compileOptions {
@@ -32,6 +43,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        resValues = true // lets the sideload build type override app_name
     }
 }
 
