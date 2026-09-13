@@ -183,6 +183,35 @@ enum class VadStatus {
     SPEECH_DETECTED
 }
 
+/**
+ * Transient status of the local voice pipeline, shown in the transcript slot
+ * while no real transcription is available yet.
+ *
+ * Single source of truth for both the producer (ViewModel) and the consumers
+ * (Compose screens): the screens style the transcript banner from the enum
+ * instead of matching text prefixes, and [displayText] is the only place the
+ * user-visible wording lives.
+ */
+enum class VoiceStatus(val displayText: String) {
+    /** Hands-free VAD is capturing; waiting for speech. */
+    LISTENING("Listening..."),
+
+    /** Push-to-talk is held down. */
+    LISTENING_PTT("Listening (PTT)..."),
+
+    /** Audio turn closed; on-device STT is running. */
+    TRANSCRIBING("Transcribing..."),
+
+    /** STT produced nothing usable for this turn. */
+    UNCLEAR("Voice unclear — speak closer or use Dictate");
+
+    companion object {
+        /** Maps a transcript string back to a status, or null for real message text. */
+        fun fromTranscript(text: String): VoiceStatus? =
+            entries.firstOrNull { it.displayText == text }
+    }
+}
+
 data class PeerDevice(
     val id: String,
     val name: String,

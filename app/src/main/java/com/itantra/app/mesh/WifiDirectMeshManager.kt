@@ -34,6 +34,18 @@ import java.net.SocketException
 import kotlin.concurrent.thread
 
 /**
+ * One datagram received from the UDP mesh, together with where it came from.
+ *
+ * The source address is what lets the ViewModel learn a peer's direct IP and
+ * answer back with unicast traffic (broadcast alone does not cross subnets).
+ */
+class MeshDatagram(
+    val bytes: ByteArray,
+    val sourceAddress: String,
+    val sourcePort: Int
+)
+
+/**
  * Wi-Fi Direct P2P group management + UDP broadcast mesh for iTantra.
  *
  * BE HONEST ABOUT OEM BEHAVIOUR: Wi-Fi Direct group formation is notoriously
@@ -82,11 +94,11 @@ class WifiDirectMeshManager(context: Context) {
     val isP2pEnabled: StateFlow<Boolean> = _isP2pEnabled.asStateFlow()
 
     /** Incoming datagrams from the mesh (voice frames, link requests, ...). */
-    private val _incomingDatagrams = MutableSharedFlow<ByteArray>(
+    private val _incomingDatagrams = MutableSharedFlow<MeshDatagram>(
         extraBufferCapacity = 32,
         onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
     )
-    val incomingDatagrams: SharedFlow<ByteArray> = _incomingDatagrams.asSharedFlow()
+    val incomingDatagrams: SharedFlow<MeshDatagram> = _incomingDatagrams.asSharedFlow()
 
     private var socket: DatagramSocket? = null
     private var udpThread: Thread? = null
@@ -361,7 +373,13 @@ class WifiDirectMeshManager(context: Context) {
                 s.receive(packet)
                 if (packet.length > 0) {
                     Log.i("WifiDirectMeshManager", "UDP rx: received ${packet.length} bytes from ${packet.address}:${packet.port}")
-                    _incomingDatagrams.tryEmit(packet.data.copyOf(packet.length))
+                    _incomingDatagrams.tryEmit(
+                        MeshDatagram(
+                            bytes = packet.data.copyOf(packet.length),
+                            sourceAddress = packet.address?.hostAddress.orEmpty(),
+                            sourcePort = packet.port
+                        )
+                    )
                 }
             } catch (_: SocketException) {
                 break // socket closed — exit the loop

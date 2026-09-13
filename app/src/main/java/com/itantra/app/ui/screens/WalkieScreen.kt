@@ -35,7 +35,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.Check
@@ -77,6 +79,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.itantra.app.model.PeerDevice
+import com.itantra.app.model.TransportProtocol
 import com.itantra.app.ui.theme.AccentBlue
 import com.itantra.app.ui.theme.AccentBlueContainer
 import com.itantra.app.ui.theme.BadgeMintContainer
@@ -120,6 +123,20 @@ fun WalkieScreen(
     val discoveredDevices by viewModel.discoveredWalkieDevices.collectAsState()
     val isVadSpeaking by viewModel.isVadSpeaking.collectAsState()
     val audioLevel by viewModel.audioLevel.collectAsState()
+    val isWalkieLinkActive by viewModel.isWalkieLinkActive.collectAsState()
+    val isReceivingAudio by viewModel.isReceivingAudio.collectAsState()
+    val remoteAudioLevel by viewModel.remoteAudioLevel.collectAsState()
+
+    // Real audio levels only: local mic while transmitting, received frame
+    // RMS while a peer is talking. Nothing is synthesised for display.
+    val liveAudioLevel = if (isReceivingAudio) {
+        remoteAudioLevel
+    } else if (isTransmitting || isVadSpeaking) {
+        audioLevel
+    } else {
+        0f
+    }
+    val connectedPairedCount = pairedDevices.count { it.isConnected }
 
     val scrollState = rememberScrollState()
 
@@ -419,7 +436,7 @@ fun WalkieScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Tap to join off-grid team mesh • Automatically connects to remembered radios in 250m",
+                        text = "Tap to join off-grid team mesh • Automatically reconnects to remembered radios in range",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         color = colors.textSecondary,
@@ -493,7 +510,7 @@ fun WalkieScreen(
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(BadgeMintContainer)
+                                .background(if (isWalkieLinkActive) BadgeMintContainer else colors.cardSecondaryBg)
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -501,20 +518,21 @@ fun WalkieScreen(
                                     modifier = Modifier
                                         .size(6.dp)
                                         .clip(CircleShape)
-                                        .background(Color(0xFF059669))
+                                        .background(if (isWalkieLinkActive) Color(0xFF059669) else colors.textSecondary)
                                 )
                                 Spacer(modifier = Modifier.width(5.dp))
                                 Text(
-                                    text = "DIRECT LINK ACTIVE",
+                                    text = if (isWalkieLinkActive) "DIRECT LINK ACTIVE" else "SEARCHING FOR TEAM",
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = BadgeMintText
+                                    color = if (isWalkieLinkActive) BadgeMintText else colors.textSecondary
                                 )
                             }
                         }
                     }
 
                     // Voice Equalizer / PTT Central Disc
+                    val isLiveTx = (isTransmitting || isVadSpeaking) && !isMicMuted
                     Box(
                         modifier = Modifier
                             .size(136.dp)
@@ -522,14 +540,17 @@ fun WalkieScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         // Concentric expanding soundwave rings when speaking/transmitting
-                        if (isTransmitting || (isVadSpeaking && !isMicMuted)) {
+                        if (isLiveTx || isReceivingAudio) {
                             Box(
                                 modifier = Modifier
                                     .size(136.dp)
                                     .scale(ringScale)
                                     .alpha(ringAlpha)
                                     .clip(CircleShape)
-                                    .background(MeshGreen.copy(alpha = 0.25f))
+                                    .background(
+                                        if (isReceivingAudio) AccentBlue.copy(alpha = 0.22f)
+                                        else MeshGreen.copy(alpha = 0.25f)
+                                    )
                             )
                         }
 
@@ -542,7 +563,8 @@ fun WalkieScreen(
                                 .background(
                                     when {
                                         isMicMuted -> Brush.radialGradient(listOf(Color(0xFFFEF2F2), Color(0xFFFCA5A5)))
-                                        isTransmitting || isVadSpeaking -> Brush.radialGradient(listOf(MeshGreen, Color(0xFF047857)))
+                                        isLiveTx -> Brush.radialGradient(listOf(MeshGreen, Color(0xFF047857)))
+                                        isReceivingAudio -> Brush.radialGradient(listOf(Color(0xFF38BDF8), Color(0xFF1D4ED8)))
                                         else -> Brush.radialGradient(listOf(Color(0xFF3B82F6), Color(0xFF1D4ED8)))
                                     }
                                 )
@@ -550,7 +572,8 @@ fun WalkieScreen(
                                     width = 2.5.dp,
                                     color = when {
                                         isMicMuted -> SosRed
-                                        isTransmitting || isVadSpeaking -> Color(0xFFA7F3D0)
+                                        isLiveTx -> Color(0xFFA7F3D0)
+                                        isReceivingAudio -> Color(0xFFBAE6FD)
                                         else -> Color.White
                                     },
                                     shape = CircleShape
@@ -560,7 +583,8 @@ fun WalkieScreen(
                             Icon(
                                 imageVector = when {
                                     isMicMuted -> Icons.Default.MicOff
-                                    isTransmitting || isVadSpeaking -> Icons.Default.GraphicEq
+                                    isLiveTx -> Icons.Default.GraphicEq
+                                    isReceivingAudio -> Icons.AutoMirrored.Filled.VolumeUp
                                     else -> Icons.Default.Mic
                                 },
                                 contentDescription = null,
@@ -577,7 +601,8 @@ fun WalkieScreen(
                             .background(
                                 when {
                                     isMicMuted -> Color(0xFFFEE2E2)
-                                    isTransmitting || isVadSpeaking -> Color(0xFFECFDF5)
+                                    isReceivingAudio -> Color(0xFFEFF6FF)
+                                    isLiveTx -> Color(0xFFECFDF5)
                                     else -> Color(0xFFEFF6FF)
                                 }
                             )
@@ -586,20 +611,25 @@ fun WalkieScreen(
                         Text(
                             text = when {
                                 isMicMuted -> "MIC MUTED • TAP UNMUTE TO SPEAK"
-                                isTransmitting || isVadSpeaking -> "TRANSCRIBING & SENDING..."
+                                isReceivingAudio -> "RECEIVING LIVE VOICE..."
+                                isLiveTx -> "TRANSMITTING LIVE VOICE + TEXT"
                                 else -> "AUTO-VOICE ACTIVE • SPEAK FREELY"
                             },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = when {
                                 isMicMuted -> SosRedDark
-                                isTransmitting || isVadSpeaking -> MeshGreenText
+                                isReceivingAudio -> AccentBlue
+                                isLiveTx -> MeshGreenText
                                 else -> AccentBlue
                             }
                         )
                     }
 
-                    // Live 24-Bar Equalizer Audio Spectrum Visualizer
+                    // Live 24-Bar Equalizer Audio Spectrum Visualizer.
+                    // Bar heights are driven purely by the measured audio level
+                    // (mic while transmitting, received frame RMS while a peer
+                    // speaks) — there is no decorative animation.
                     Row(
                         modifier = Modifier
                             .fillMaxWidth(0.92f)
@@ -608,24 +638,25 @@ fun WalkieScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         repeat(24) { index ->
+                            val centreDistance = kotlin.math.abs(index - 11.5f) / 11.5f
+                            val weight = 1f - centreDistance * 0.7f
                             val heightFraction = when {
-                                isMicMuted -> 0.1f
-                                isTransmitting || isVadSpeaking -> {
-                                    (0.2f + 0.8f * kotlin.math.sin((index * 0.5f + audioLevel * 10f)).coerceAtLeast(0.1f))
-                                }
-                                else -> (0.15f + 0.1f * kotlin.math.sin(index * 0.4f).coerceAtLeast(0.05f))
+                                isMicMuted -> 0.08f
+                                isReceivingAudio || isLiveTx -> (0.06f + 0.94f * liveAudioLevel * weight).coerceIn(0.06f, 1f)
+                                else -> 0.08f
                             }
 
                             Box(
                                 modifier = Modifier
                                     .width(3.dp)
-                                    .height((26.dp * heightFraction).coerceAtLeast(4.dp))
+                                    .height((26.dp * heightFraction).coerceAtLeast(3.dp))
                                     .clip(RoundedCornerShape(2.dp))
                                     .background(
                                         when {
                                             isMicMuted -> Color(0xFFE2E8F0)
-                                            isTransmitting || isVadSpeaking -> MeshGreen
-                                            else -> AccentBlue.copy(alpha = 0.6f)
+                                            isReceivingAudio -> AccentBlue
+                                            isLiveTx -> MeshGreen
+                                            else -> AccentBlue.copy(alpha = 0.35f)
                                         }
                                     )
                             )
@@ -762,7 +793,7 @@ fun WalkieScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "PAIRED TEAM RADIOS (${pairedDevices.size} CONNECTED)",
+                            text = "PAIRED TEAM RADIOS ($connectedPairedCount OF ${pairedDevices.size} CONNECTED)",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 0.8.sp,
@@ -781,6 +812,14 @@ fun WalkieScreen(
                                 color = colors.badgeMintText
                             )
                         }
+                    }
+
+                    if (pairedDevices.isEmpty()) {
+                        Text(
+                            text = "No paired radios yet. Pair a discovered node below — it reconnects automatically.",
+                            fontSize = 12.sp,
+                            color = colors.textSecondary
+                        )
                     }
 
                     pairedDevices.forEach { peer ->
@@ -806,7 +845,10 @@ fun WalkieScreen(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.Wifi,
+                                        imageVector = when (peer.protocol) {
+                                            TransportProtocol.WIFI_DIRECT -> Icons.Default.Wifi
+                                            else -> Icons.Default.Bluetooth
+                                        },
                                         contentDescription = null,
                                         tint = colors.accent,
                                         modifier = Modifier.size(18.dp)
@@ -829,9 +871,13 @@ fun WalkieScreen(
                                             else -> "Fair Signal"
                                         }
                                         Text(
-                                            text = "Connected • $signalDesc",
+                                            text = if (peer.isConnected) {
+                                                "Connected • $signalDesc"
+                                            } else {
+                                                "Paired • Out of range"
+                                            },
                                             fontSize = 11.sp,
-                                            color = colors.badgeMintText,
+                                            color = if (peer.isConnected) colors.badgeMintText else colors.textSecondary,
                                             fontWeight = FontWeight.Medium
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
@@ -912,6 +958,18 @@ fun WalkieScreen(
                         }
                     }
 
+                    if (discoveredDevices.isEmpty()) {
+                        Text(
+                            text = if (isRefreshingNodes) {
+                                "Scanning for BLE + Wi-Fi Direct nodes in range..."
+                            } else {
+                                "No nodes in range yet. Both phones must have Walkie Mesh active."
+                            },
+                            fontSize = 12.sp,
+                            color = colors.textSecondary
+                        )
+                    }
+
                     discoveredDevices.forEach { peer ->
                         Row(
                             modifier = Modifier
@@ -936,7 +994,7 @@ fun WalkieScreen(
                                     else -> "Fair Signal"
                                 }
                                 Text(
-                                    text = "Nearby Phone • $signalDesc",
+                                    text = "${if (peer.protocol == TransportProtocol.BLE) "BLE" else "Wi-Fi Direct"} • $signalDesc",
                                     fontSize = 11.sp,
                                     color = colors.textSecondary
                                 )

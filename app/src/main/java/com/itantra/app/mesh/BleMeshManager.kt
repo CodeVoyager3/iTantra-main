@@ -85,6 +85,20 @@ data class DistressBeaconPayload(
         const val PAYLOAD_BYTES = 8 + 1 + 4 + 4 + 2 + 2 + 1 // 22
 
         /**
+         * `altitudeMeters` sentinel for a non-distress node that is only
+         * advertising Walkie-Talkie presence. Keeps walkie peers out of the
+         * rescuer lists (which treat `0` as an idle rescuer and a positive
+         * value as "this rescuer is calling my node").
+         */
+        const val ALTITUDE_WALKIE_PRESENCE = -32768
+
+        /** `altitudeMeters` value of an idle rescuer that is not targeting anybody. */
+        const val ALTITUDE_RESCUER_IDLE = 0
+
+        /** `altitudeMeters` value of a rescuer streaming a 1-way broadcast to all. */
+        const val ALTITUDE_RESCUER_BROADCAST_ALL = -1
+
+        /**
          * Parses a beacon payload as delivered by BLE scan callbacks (the
          * 22-byte form) or the full 24-byte form prefixed with the
          * manufacturer ID.
@@ -208,6 +222,14 @@ class BleMeshManager(context: Context) {
         /** Standard CCCD UUID for BLE notifications. */
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
+        /**
+         * Largest single GATT write this stack is configured for (the peer MTU
+         * requested on connect). Packets above this limit are NOT delivered by
+         * a plain characteristic write; callers must fall back to another
+         * transport.
+         */
+        const val MAX_GATT_WRITE_BYTES = 512
+
         private const val BEACON_STALE_MS = 3_000L
         private const val PRUNE_PERIOD_MS = 1_000L
     }
@@ -227,6 +249,14 @@ class BleMeshManager(context: Context) {
     private val _incomingPackets = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
     val incomingPackets: SharedFlow<ByteArray> = _incomingPackets.asSharedFlow()
 
+    /**
+     * Mesh node ids that currently have a live BLE GATT link with us (either
+     * direction: we are the GATT client, or the peer is connected to our GATT
+     * server). Drives the "link active" HUD instead of a hardcoded label.
+     */
+    private val _connectedNodeIds = MutableStateFlow<Set<Long>>(emptySet())
+    val connectedNodeIds: StateFlow<Set<Long>> = _connectedNodeIds.asStateFlow()
+
     /** Invoked with the failure code when advertising cannot start. */
     var onAdvertisingFailed: ((AdvertiseFailure) -> Unit)? = null
 
@@ -238,6 +268,28 @@ class BleMeshManager(context: Context) {
     private val connectedGattClients = ConcurrentHashMap.newKeySet<BluetoothDevice>()
     private val discoveredDevices = ConcurrentHashMap<Long, BluetoothDevice>()
     private val activeGattClients = ConcurrentHashMap<String, BluetoothGatt>()
+
+    /** Reverse lookup so a GATT link (keyed by MAC) can be mapped back to a mesh node id. */
+    private val nodeIdByAddress = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Recomputes the set of mesh nodes with a live GATT link. A node is linked
+     * while either direction is up: it is connected to our GATT server, or we
+     * hold a client connection to it.
+     */
+    private fun refreshLinkedNodes() {
+        val addresses = connectedGattClients.map { it.address } + activeGattClients.keys
+        val nodeIds = addresses.mapNotNull { nodeIdByAddress[it] }.toSet()
+        if (nodeIds != _connectedNodeIds.value) _connectedNodeIds.value = nodeIds
+    }
+
+    private fun markLinked(device: BluetoothDevice) {
+        if (nodeIdByAddress.containsKey(device.address)) refreshLinkedNodes()
+    }
+
+    private fun markUnlinked(device: BluetoothDevice) {
+        if (nodeIdByAddress.containsKey(device.address)) refreshLinkedNodes()
+    }
 
     private val bluetoothAdapter: BluetoothAdapter? by lazy {
         try {
@@ -303,10 +355,12 @@ class BleMeshManager(context: Context) {
                 override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
                         connectedGattClients.add(device)
+                        markLinked(device)
                         Log.i("BleMeshManager", "GATT client connected to our server: ${device.address}")
                     } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                         connectedGattClients.remove(device)
                         preparedBuffers.remove(device.address)
+                        markUnlinked(device)
                         Log.i("BleMeshManager", "GATT client disconnected from our server: ${device.address}")
                     }
                 }
@@ -417,6 +471,11 @@ class BleMeshManager(context: Context) {
         }
         activeGattClients.clear()
         connectingDevices.clear()
+        // No mode needs BLE any more: drop discovery caches so stale peers are
+        // never used as GATT write targets.
+        discoveredDevices.clear()
+        nodeIdByAddress.clear()
+        refreshLinkedNodes()
     }
 
     private fun checkStopGattServer() {
@@ -441,11 +500,13 @@ class BleMeshManager(context: Context) {
                         if (newState == BluetoothProfile.STATE_CONNECTED) {
                             Log.i("BleMeshManager", "Connected to peer GATT: ${device.address}")
                             activeGattClients[device.address] = gatt
+                            markLinked(device)
                             gatt.requestMtu(512)
                             gatt.discoverServices()
                         } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                             Log.i("BleMeshManager", "Disconnected from peer GATT: ${device.address}")
                             activeGattClients.remove(device.address)
+                            markUnlinked(device)
                             runCatching { gatt.close() }
                         }
                     }
@@ -507,8 +568,23 @@ class BleMeshManager(context: Context) {
         }
     }
 
-    fun broadcastPacket(bytes: ByteArray, targetNodeId: Long? = null) {
-        if (!hasBleConnect()) return
+    /**
+     * Sends [bytes] to every reachable iTantra peer over BLE GATT.
+     *
+     * @param targetNodeId when non-null, restricts direct writes to that node.
+     * @param connectIfNeeded when false, only peers that already hold a live
+     *   GATT link are written to. Real-time 20 ms voice frames use this so a
+     *   missing link degrades to "UDP only" instead of re-running GATT
+     *   discovery 50 times per second.
+     * @return number of GATT targets the packet was handed to (notify + write).
+     */
+    fun broadcastPacket(
+        bytes: ByteArray,
+        targetNodeId: Long? = null,
+        connectIfNeeded: Boolean = true
+    ): Int {
+        if (!hasBleConnect()) return 0
+        var targets = 0
 
         // 1. Notify any clients currently connected to our local GATT server
         val server = gattServer
@@ -524,6 +600,7 @@ class BleMeshManager(context: Context) {
                         @Suppress("DEPRECATION")
                         server.notifyCharacteristicChanged(client, char, false)
                     }
+                    targets++
                     Log.d("BleMeshManager", "Notified GATT client ${client.address} with ${bytes.size} bytes")
                 } catch (e: Exception) {
                     Log.w("BleMeshManager", "Failed to notify GATT client ${client.address}", e)
@@ -532,15 +609,19 @@ class BleMeshManager(context: Context) {
         }
 
         // 2. Connect & write to discovered peer devices
-        val targets = if (targetNodeId != null) {
+        val candidates = if (targetNodeId != null) {
             listOfNotNull(discoveredDevices[targetNodeId])
         } else {
-            (discoveredDevices.values + connectedGattClients + activeGattClients.values.map { it.device }).distinctBy { it.address }
+            (discoveredDevices.values + connectedGattClients + activeGattClients.values.map { it.device })
+                .distinctBy { it.address }
         }
-
-        for (device in targets) {
+        val linkedAddresses = activeGattClients.keys
+        for (device in candidates) {
+            if (!connectIfNeeded && device.address !in linkedAddresses) continue
+            targets++
             sendPacketToDevice(device, bytes)
         }
+        return targets
     }
 
     private fun sendPacketToDevice(device: BluetoothDevice, bytes: ByteArray) {
@@ -563,11 +644,13 @@ class BleMeshManager(context: Context) {
                         if (newState == BluetoothProfile.STATE_CONNECTED) {
                             Log.i("BleMeshManager", "Connected to peer GATT: ${device.address}")
                             activeGattClients[device.address] = gatt
+                            markLinked(device)
                             gatt.requestMtu(512)
                             gatt.discoverServices()
                         } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                             Log.i("BleMeshManager", "Disconnected from peer GATT: ${device.address}")
                             activeGattClients.remove(device.address)
+                            markUnlinked(device)
                             runCatching { gatt.close() }
                         }
                     }
@@ -788,6 +871,7 @@ class BleMeshManager(context: Context) {
             val payload = DistressBeaconPayload.parseManufacturerData(payloadBytes) ?: return
 
             discoveredDevices[payload.nodeId] = result.device
+            nodeIdByAddress[result.device.address] = payload.nodeId
             connectPeerGatt(result.device)
 
             Log.d(

@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.HeadsetMic
+import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Pause
@@ -98,6 +99,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.itantra.app.model.SupportedLanguage
+import com.itantra.app.model.VoiceStatus
 import com.itantra.app.modelhub.ModelDownloadState
 import com.itantra.app.ui.theme.AccentBlue
 import com.itantra.app.ui.theme.AccentBlueContainer
@@ -146,8 +148,12 @@ fun SosDistressScreen(
         else (selectedPack?.downloadState ?: ModelDownloadState.Idle)
     val messageLogs by viewModel.messageLogs.collectAsState()
     val currentTranscript = uiState.currentTranscript
+    val voiceStatus = uiState.voiceStatus
     val isVadSpeaking by viewModel.isVadSpeaking.collectAsState()
     val isPttActive by viewModel.isPttActive.collectAsState()
+    // A rescuer streaming a strictly one-way announcement: this device is a
+    // receive-only endpoint, so it must not present talk affordances.
+    val isReceivingOneWayBroadcast by viewModel.isReceivingOneWayBroadcast.collectAsState()
 
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -761,7 +767,11 @@ fun SosDistressScreen(
                     DigitalAudioVisualizer(
                         audioLevel = audioLevel,
                         isActive = isSosBroadcasting,
-                        label = if (connectedRescuer != null) "LIVE 2-WAY INTERCOM" else "HANDS-FREE EMERGENCY MIC",
+                        label = when {
+                            isReceivingOneWayBroadcast -> "RECEIVE-ONLY RESCUER BROADCAST"
+                            connectedRescuer != null -> "LIVE 2-WAY INTERCOM"
+                            else -> "HANDS-FREE EMERGENCY MIC"
+                        },
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -919,7 +929,11 @@ fun SosDistressScreen(
                             DigitalAudioVisualizer(
                                 audioLevel = audioLevel,
                                 isActive = true,
-                                label = "RESCUER 2-WAY AUDIO LINK",
+                                label = if (isReceivingOneWayBroadcast) {
+                                    "RESCUER 1-WAY BROADCAST (RECEIVE ONLY)"
+                                } else {
+                                    "RESCUER 2-WAY AUDIO LINK"
+                                },
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
@@ -1023,95 +1037,135 @@ fun SosDistressScreen(
                             }
 
                             // Voice Controls Row: Hold to Talk (PTT) + Instant Voice Dictate
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                // 1. Hold to Talk (PTT) Button
+                            if (isReceivingOneWayBroadcast) {
+                                // Receive-only participant of a 1-way rescuer broadcast:
+                                // no talk/mic affordance is shown, because nothing sent
+                                // from here is heard on the other side.
                                 Box(
                                     modifier = Modifier
-                                        .weight(1.2f)
+                                        .fillMaxWidth()
                                         .clip(RoundedCornerShape(12.dp))
-                                        .background(
-                                            if (isPttActive || isVadSpeaking) Color(0xFFDC2626)
-                                            else if (colors.isDark) Color(0xFF1E293B)
-                                            else Color(0xFFF1F5F9)
-                                        )
-                                        .border(
-                                            1.dp,
-                                            if (isPttActive || isVadSpeaking) Color(0xFFB91C1C)
-                                            else colors.outline,
-                                            RoundedCornerShape(12.dp)
-                                        )
-                                        .pointerInput(Unit) {
-                                            detectTapGestures(
-                                                onPress = {
-                                                    viewModel.startPtt()
-                                                    tryAwaitRelease()
-                                                    viewModel.stopPtt()
-                                                }
-                                            )
-                                        }
-                                        .padding(vertical = 10.dp),
-                                    contentAlignment = Alignment.Center
+                                        .background(if (colors.isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9))
+                                        .border(1.dp, colors.outline, RoundedCornerShape(12.dp))
+                                        .padding(vertical = 12.dp, horizontal = 14.dp)
                                 ) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Default.Mic,
-                                            contentDescription = "Hold to talk",
-                                            tint = if (isPttActive || isVadSpeaking) Color.White else SosRedDark,
+                                            imageVector = Icons.Default.Hearing,
+                                            contentDescription = null,
+                                            tint = colors.textSecondary,
                                             modifier = Modifier.size(16.dp)
                                         )
-                                        Text(
-                                            text = if (isPttActive || isVadSpeaking) "RECORDING..." else "HOLD TO TALK",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isPttActive || isVadSpeaking) Color.White else colors.textPrimary
-                                        )
+                                        Column {
+                                            Text(
+                                                text = "RECEIVE-ONLY EMERGENCY BROADCAST",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = colors.textPrimary
+                                            )
+                                            Text(
+                                                text = "Rescuer is transmitting one-way. Mic and dictation are disabled.",
+                                                fontSize = 11.sp,
+                                                color = colors.textSecondary,
+                                                lineHeight = 15.sp
+                                            )
+                                        }
                                     }
                                 }
-
-                                // 2. Voice Dictation Button (Android SpeechRecognizer in selected language)
-                                Box(
-                                    modifier = Modifier
-                                        .weight(0.9f)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(AccentBlue.copy(alpha = 0.12f))
-                                        .border(1.dp, AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                        .clickable {
-                                            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                                putExtra(RecognizerIntent.EXTRA_LANGUAGE, selectedLanguage.languageTag)
-                                                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, selectedLanguage.languageTag)
-                                                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in ${selectedLanguage.nativeName}...")
-                                            }
-                                            try {
-                                                speechLauncher.launch(intent)
-                                            } catch (_: Exception) {}
-                                        }
-                                        .padding(vertical = 10.dp),
-                                    contentAlignment = Alignment.Center
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    // 1. Hold to Talk (PTT) Button
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1.2f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(
+                                                if (isPttActive || isVadSpeaking) Color(0xFFDC2626)
+                                                else if (colors.isDark) Color(0xFF1E293B)
+                                                else Color(0xFFF1F5F9)
+                                            )
+                                            .border(
+                                                1.dp,
+                                                if (isPttActive || isVadSpeaking) Color(0xFFB91C1C)
+                                                else colors.outline,
+                                                RoundedCornerShape(12.dp)
+                                            )
+                                            .pointerInput(Unit) {
+                                                detectTapGestures(
+                                                    onPress = {
+                                                        viewModel.startPtt()
+                                                        tryAwaitRelease()
+                                                        viewModel.stopPtt()
+                                                    }
+                                                )
+                                            }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
                                     ) {
-                                        Text(
-                                            text = "🗣️ DICTATE",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = AccentBlue
-                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Mic,
+                                                contentDescription = "Hold to talk",
+                                                tint = if (isPttActive || isVadSpeaking) Color.White else SosRedDark,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text(
+                                                text = if (isPttActive || isVadSpeaking) "RECORDING..." else "HOLD TO TALK",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isPttActive || isVadSpeaking) Color.White else colors.textPrimary
+                                            )
+                                        }
+                                    }
+
+                                    // 2. Voice Dictation Button (Android SpeechRecognizer in selected language)
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(0.9f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(AccentBlue.copy(alpha = 0.12f))
+                                            .border(1.dp, AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                            .clickable {
+                                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, selectedLanguage.languageTag)
+                                                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, selectedLanguage.languageTag)
+                                                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in ${selectedLanguage.nativeName}...")
+                                                }
+                                                try {
+                                                    speechLauncher.launch(intent)
+                                                } catch (_: Exception) {}
+                                            }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text(
+                                                text = "🗣️ DICTATE",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = AccentBlue
+                                            )
+                                        }
                                     }
                                 }
                             }
 
                             // Active speaking recording pulse banner
-                            if (isVadSpeaking || isPttActive) {
+                            if (!isReceivingOneWayBroadcast && (isVadSpeaking || isPttActive)) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -1142,9 +1196,9 @@ fun SosDistressScreen(
 
                             // Live transcript / processing status banner
                             if (currentTranscript.isNotBlank()) {
-                                val isListening = currentTranscript.startsWith("🎙️")
-                                val isTranscribing = currentTranscript.startsWith("🧠")
-                                val isWarning = currentTranscript.startsWith("⚠️")
+                                val isListening = voiceStatus == VoiceStatus.LISTENING || voiceStatus == VoiceStatus.LISTENING_PTT
+                                val isTranscribing = voiceStatus == VoiceStatus.TRANSCRIBING
+                                val isWarning = voiceStatus == VoiceStatus.UNCLEAR
 
                                 Box(
                                     modifier = Modifier
@@ -1526,7 +1580,11 @@ fun SosDistressScreen(
                             }
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = if (isSosBroadcasting) "12ms latency • 8 mesh nodes" else "High-speed local audio & mesh network",
+                                text = if (isSosBroadcasting) {
+                                    "Broadcasting on UDP port 8889 • direct device link"
+                                } else {
+                                    "High-speed local audio & mesh network"
+                                },
                                 fontSize = 12.sp,
                                 color = Color(0xFF64748B)
                             )

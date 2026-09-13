@@ -120,6 +120,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.window.DialogProperties
 import com.itantra.app.model.DistressVictim
 import com.itantra.app.model.RescueConnectionMode
+import com.itantra.app.model.VoiceStatus
 import com.itantra.app.ui.components.BatteryIndicator
 import com.itantra.app.ui.components.DigitalAudioVisualizer
 import com.itantra.app.ui.theme.AccentBlue
@@ -186,6 +187,7 @@ fun RescueScreen(
     val modelPacks by viewModel.modelPacks.collectAsState()
     val messageLogs by viewModel.messageLogs.collectAsState()
     val currentTranscript = uiState.currentTranscript
+    val voiceStatus = uiState.voiceStatus
     val isVadSpeaking by viewModel.isVadSpeaking.collectAsState()
     val isPttActive by viewModel.isPttActive.collectAsState()
     val isModelInstalled = modelPacks.firstOrNull { it.iso == selectedLanguage.code || it.languageTag.startsWith(selectedLanguage.code) }?.isInstalled == true
@@ -1356,9 +1358,9 @@ fun RescueScreen(
 
                         // Live transcript / processing status banner
                         if (currentTranscript.isNotBlank()) {
-                            val isListening = currentTranscript.startsWith("🎙️")
-                            val isTranscribing = currentTranscript.startsWith("🧠")
-                            val isWarning = currentTranscript.startsWith("⚠️")
+                            val isListening = voiceStatus == VoiceStatus.LISTENING || voiceStatus == VoiceStatus.LISTENING_PTT
+                            val isTranscribing = voiceStatus == VoiceStatus.TRANSCRIBING
+                            val isWarning = voiceStatus == VoiceStatus.UNCLEAR
 
                             Box(
                                 modifier = Modifier
