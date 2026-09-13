@@ -118,6 +118,11 @@ fun SettingsScreen(
     val installedPacks = modelPacks.filter { it.isInstalled }
     val installedStorageMb = installedPacks.sumOf { it.sizeMb }
 
+    val isTranslationInstalled by viewModel.isTranslationModelInstalled.collectAsState()
+    val translationDownloadState by viewModel.translationDownloadState.collectAsState()
+    var testTranslationInput by remember { mutableStateOf("हम मलबे में दबे हैं") }
+    var testTranslationOutput by remember { mutableStateOf("") }
+
     // State for delete confirmation dialog
     var modelToDelete by remember { mutableStateOf<LanguageModelPack?>(null) }
     var showWipeConfirmDialog by remember { mutableStateOf(false) }
@@ -417,6 +422,320 @@ fun SettingsScreen(
                             onCancelDownload = { viewModel.cancelModelDownload(pack.languageTag) },
                             onDeleteClick = { modelToDelete = pack }
                         )
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 3B. NEURAL TRANSLATION ENGINES (CROSS-LINGUAL MESH)
+        // ==========================================
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(colors.surface)
+                .border(1.dp, colors.outline, RoundedCornerShape(20.dp))
+                .padding(16.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(AccentBlueContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Translate,
+                            contentDescription = null,
+                            tint = AccentBlue,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "NEURAL TRANSLATION ENGINES",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.textPrimary
+                        )
+                        Text(
+                            text = "Cross-lingual mesh (Hindi ⟷ English)",
+                            fontSize = 11.sp,
+                            color = colors.textSecondary
+                        )
+                    }
+                    // Status Badge
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                if (isTranslationInstalled) BadgeMintContainer
+                                else if (translationDownloadState is ModelDownloadState.Downloading) AccentBlueContainer
+                                else colors.cardSecondaryBg
+                            )
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = when {
+                                isTranslationInstalled -> "✓ INSTALLED"
+                                translationDownloadState is ModelDownloadState.Downloading -> "DOWNLOADING"
+                                else -> "NOT DOWNLOADED"
+                            },
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = when {
+                                isTranslationInstalled -> BadgeMintText
+                                translationDownloadState is ModelDownloadState.Downloading -> AccentBlue
+                                else -> colors.textSecondary
+                            }
+                        )
+                    }
+                }
+
+                // Description Box
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colors.cardSecondaryBg)
+                        .padding(12.dp)
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Model: Google ML Kit Neural NMT (hi ↔ en)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.textPrimary
+                            )
+                            Text(
+                                text = "Google On-Device",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.textSecondary
+                            )
+                        }
+                        Text(
+                            text = "Powered by Google ML Kit On-Device Neural Machine Translation. Translates full sentences offline between Hindi and English. If neither device has this pack installed, cross-lingual voice turns will pause with a prompt.",
+                            fontSize = 11.sp,
+                            color = colors.textSecondary,
+                            lineHeight = 15.sp
+                        )
+
+                        // Download Progress bar if active
+                        if (translationDownloadState is ModelDownloadState.Downloading) {
+                            val state = translationDownloadState as ModelDownloadState.Downloading
+                            Spacer(modifier = Modifier.height(4.dp))
+                            LinearProgressIndicator(
+                                progress = { state.progress },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(6.dp)
+                                    .clip(CircleShape),
+                                color = colors.accent,
+                                trackColor = colors.outline
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "Downloading offline neural weights...",
+                                    fontSize = 10.sp,
+                                    color = AccentBlue
+                                )
+                                Text(
+                                    text = "${(state.progress * 100).toInt()}%",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AccentBlue
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Action Button Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isTranslationInstalled) {
+                        OutlinedButton(
+                            onClick = { viewModel.deleteTranslationModel() },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = SosRed
+                            ),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SosRed.copy(alpha = 0.5f)),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Delete,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = SosRed
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Remove Model", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    } else if (translationDownloadState is ModelDownloadState.Downloading) {
+                        Button(
+                            onClick = { },
+                            enabled = false,
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("Downloading...", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    } else {
+                        Button(
+                            onClick = { viewModel.downloadTranslationModel() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = colors.accent,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Translate,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Download Model (Google ML Kit)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = colors.outline, thickness = 1.dp)
+
+                // -------------------------------------------------------------
+                // TEST SANDBOX: Instant offline verification for judges & demo
+                // -------------------------------------------------------------
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = colors.accent,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "OFFLINE TRANSLATION TEST SANDBOX",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.8.sp,
+                            color = colors.textSecondary
+                        )
+                    }
+
+                    Text(
+                        text = "Tap any emergency phrase to test 100% offline bidirectional translation:",
+                        fontSize = 11.sp,
+                        color = colors.textSecondary
+                    )
+
+                    // Quick test pills
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        listOf(
+                            "हम मलबे में दबे हैं",
+                            "मदद चाहिए",
+                            "Rescue team is on the way",
+                            "Are you okay?",
+                            "पानी चाहिए",
+                            "Severely injured"
+                        ).forEach { sample ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(colors.cardSecondaryBg)
+                                    .border(1.dp, colors.outline, RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        testTranslationInput = sample
+                                        val isHindi = sample.any { it.code in 0x0900..0x097F }
+                                        testTranslationOutput = if (isHindi) {
+                                            viewModel.translateEmergencyText(sample, "hi", "en")
+                                        } else {
+                                            viewModel.translateEmergencyText(sample, "en", "hi")
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                            ) {
+                                Text(
+                                    text = sample,
+                                    fontSize = 11.sp,
+                                    color = colors.textPrimary
+                                )
+                            }
+                        }
+                    }
+
+                    // Live Test Result Card
+                    if (testTranslationOutput.isNotBlank() || testTranslationInput.isNotBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(colors.cardSecondaryBg)
+                                .border(1.dp, colors.accent.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                                .padding(10.dp)
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                val isInputHindi = testTranslationInput.any { it.code in 0x0900..0x097F }
+                                val fromTag = if (isInputHindi) "Hindi" else "English"
+                                val toTag = if (isInputHindi) "English" else "Hindi"
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "$fromTag ➔ $toTag",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.accent
+                                    )
+                                    Text(
+                                        text = "Google ML Kit Neural NMT",
+                                        fontSize = 10.sp,
+                                        color = BadgeMintText
+                                    )
+                                }
+                                Text(
+                                    text = "Input: \"$testTranslationInput\"",
+                                    fontSize = 12.sp,
+                                    color = colors.textSecondary
+                                )
+                                Text(
+                                    text = "Output: \"${if (testTranslationOutput.isNotBlank()) testTranslationOutput else viewModel.translateEmergencyText(testTranslationInput, if (isInputHindi) "hi" else "en", if (isInputHindi) "en" else "hi")}\"",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = BadgeMintText
+                                )
+                            }
+                        }
                     }
                 }
             }

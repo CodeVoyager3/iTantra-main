@@ -261,7 +261,8 @@ data class RescuerNode(
     val isConnected: Boolean = false,
     val nodeId: Long = 0L,  // mesh node id of the beacon this rescuer was derived from
     val age: Int? = null,   // from the peer's MSG_TYPE_PROFILE advert, when received
-    val gender: String = "" // from the peer's MSG_TYPE_PROFILE advert, when received
+    val gender: String = "", // from the peer's MSG_TYPE_PROFILE advert, when received
+    val language: SupportedLanguage = SupportedLanguage.ENGLISH
 ) {
     /** `34 • Male` (or whichever parts are known), null when both are unknown. */
     val identityLabel: String? get() = identitySuffix(age, gender)

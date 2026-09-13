@@ -73,6 +73,12 @@ object PacketFraming {
     const val MSG_TYPE_PROFILE = 0x08
 
     /**
+     * Peer translation capability beacon: payload is `langCode|hasTranslatorFlag`
+     * used to exchange offline NMT engine presence between nodes.
+     */
+    const val MSG_TYPE_TRANSLATION_CAPABILITY = 0x09
+
+    /**
      * Serializes [packet] into a single byte array, appending a CRC32
      * (little-endian, as produced by [java.util.zip.CRC32]) over the header
      * and payload.

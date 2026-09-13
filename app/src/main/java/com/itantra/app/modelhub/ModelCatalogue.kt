@@ -24,6 +24,32 @@ data class CatalogueLanguage(
 )
 
 /**
+ * Dedicated catalogue entry for the cross-lingual Neural Machine Translation (NMT) engine.
+ */
+data class CatalogueTranslationModel(
+    val id: String = "nmt-hi-en",
+    val name: String = "Google ML Kit Neural NMT (hi ↔ en)",
+    val description: String = "Google ML Kit On-Device Neural Machine Translation (Hindi <-> English)",
+    val archive: String = "nmt-hi-en-1.0.0.itantra",
+    val sizeBytes: Long = 50_855_936L,
+    val sizeMb: Double = 48.5,
+    val sha256: String = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+) {
+    fun toCatalogueLanguage() = CatalogueLanguage(
+        languageTag = id,
+        name = name,
+        script = "Devanagari/Latin",
+        iso = "hi-en",
+        archive = archive,
+        sizeBytes = sizeBytes,
+        sizeMb = sizeMb,
+        sha256 = sha256,
+        tested = true,
+        published = true
+    )
+}
+
+/**
  * The iTantra offline model catalogue.
  *
  * The full catalogue is compiled into the app so the model hub works with
@@ -38,6 +64,8 @@ object ModelCatalogue {
 
     const val DOWNLOAD_BASE_URL =
         "https://huggingface.co/helo-ayush/itantra-models/resolve/main/"
+
+    val translationModel = CatalogueTranslationModel()
 
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 15_000

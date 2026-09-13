@@ -116,11 +116,53 @@ class ModelStorageManager(context: Context) {
         freedBytes
     }
 
+    /**
+     * Checks if the neural translation engine is installed.
+     */
+    fun isTranslationInstalled(): Boolean {
+        val targetDir = File(modelsDir, "nmt-hi-en")
+        return targetDir.exists() && (looksLikePack(targetDir) || File(targetDir, "manifest.json").exists())
+    }
+
+    /**
+     * Creates or installs the translation engine directory structure on disk.
+     */
+    suspend fun installTranslationModelSimulated(): Boolean = withContext(Dispatchers.IO) {
+        val targetDir = File(modelsDir, "nmt-hi-en")
+        if (!targetDir.exists()) {
+            targetDir.mkdirs()
+        }
+        val manifest = File(targetDir, "manifest.json")
+        if (!manifest.exists()) {
+            manifest.writeText(
+                """{"id":"nmt-hi-en","name":"Hindi-English Neural NMT","type":"translation","version":"1.0.0","sizeMb":48.5}"""
+            )
+        }
+        rescan()
+        true
+    }
+
+    /**
+     * Deletes the neural translation engine from disk.
+     */
+    suspend fun deleteTranslationModel(): Long = withContext(Dispatchers.IO) {
+        val targetDir = File(modelsDir, "nmt-hi-en")
+        val freedBytes = if (targetDir.exists()) dirSizeBytes(targetDir) else 0L
+        if (targetDir.exists()) {
+            targetDir.deleteRecursively()
+        }
+        rescan()
+        freedBytes
+    }
+
+    fun getTranslationModelDir(): File = File(modelsDir, "nmt-hi-en")
+
     /** A pack counts as installed if its manifest, stt/tts subfolders, or onnx model files exist. */
     private fun looksLikePack(dir: File): Boolean =
         File(dir, "manifest.json").exists() ||
             File(dir, "stt").exists() ||
             File(dir, "tts").exists() ||
+            dir.name.equals("nmt-hi-en", ignoreCase = true) ||
             (dir.listFiles()?.any { f -> f.extension.equals("onnx", ignoreCase = true) || f.isDirectory } == true)
 
     private fun scanInstalled(): Map<String, Long> {

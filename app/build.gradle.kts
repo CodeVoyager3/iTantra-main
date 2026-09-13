@@ -82,6 +82,9 @@ dependencies {
     // --- ONNX Runtime (offline neural inference) ---
     implementation(libs.onnxruntime.android)
 
+    // --- Google ML Kit On-Device Translation ---
+    implementation("com.google.mlkit:translate:17.0.3")
+
     // --- Coroutines ---
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.core)
