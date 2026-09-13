@@ -1230,14 +1230,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 lastRescuerContactEpochMs = System.currentTimeMillis()
                 syncVoiceCaptureState()
             } else if (_connectedRescuer.value != null) {
-                // If neither BLE beacon nor recent UDP contact in the last 4 seconds, mark disconnected
-                if (System.currentTimeMillis() - lastRescuerContactEpochMs > 4000L) {
+                // If neither BLE beacon nor recent UDP contact in the last 15 seconds, mark disconnected
+                if (System.currentTimeMillis() - lastRescuerContactEpochMs > 15000L) {
                     _connectedRescuer.value = null
                     _isReceivingOneWayBroadcast.value = false
                     syncVoiceCaptureState()
                 }
-            } else {
-                _isReceivingOneWayBroadcast.value = false
             }
         }
         if (_isWalkieActive.value) {
@@ -1396,6 +1394,27 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 logVoice("decode", "text from ${nodeCallsign(packet.nodeId)} (lang=$langCode): '$text'")
 
                 if (text.isNotBlank()) {
+                    // If in SOS mode and not currently in a 1-to-1 call, this incoming message
+                    // is a 1-way emergency broadcast announcement from a rescuer!
+                    if (_isSosBroadcasting.value && (_connectedRescuer.value == null || _isReceivingOneWayBroadcast.value)) {
+                        _isReceivingOneWayBroadcast.value = true
+                        lastRescuerContactEpochMs = System.currentTimeMillis()
+                        val rescuerId = "resc-${packet.nodeId}"
+                        val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
+                        if (_connectedRescuer.value == null) {
+                            _connectedRescuer.value = existing?.copy(isConnected = true)
+                                ?: RescuerNode(
+                                    id = rescuerId,
+                                    callsign = nodeCallsign(packet.nodeId),
+                                    distanceMeters = existing?.distanceMeters ?: 1,
+                                    signalDbm = existing?.signalDbm ?: -50,
+                                    role = "iTantra Rescuer (Broadcast)",
+                                    isConnected = true
+                                )
+                        }
+                        syncVoiceCaptureState()
+                    }
+
                     // 1. ALWAYS record in UI transcript and message log so emergency messages are never lost
                     viewModelScope.launch(Dispatchers.Main) {
                         _uiState.update {
@@ -1452,8 +1471,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 // this frame plays, or the speaker feeds the mic and the
                 // live voice stream loops between phones.
                 extendEchoGuard(pcm.size * 1000L / (AudioCaptureEngine.SAMPLE_RATE_HZ * 2))
-                // Live intercom is never barge-in eligible — it stays half-duplex.
-                allowBargeIn = false
                 audioPlaybackEngine?.play(pcm, AudioCaptureEngine.SAMPLE_RATE_HZ)
                 val rms = calculateRmsLevel(pcm)
                 _audioLevel.value = rms
@@ -1609,51 +1626,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private fun isEchoGuardActive(): Boolean = SystemClock.uptimeMillis() < echoGuardUntil
 
     // =========================================================================
-    // BARGE-IN (near-mic speech aborts our own clip playback)
-    // =========================================================================
-
-    /** Minimum gap between barge-in aborts so one shout cannot machine-gun. */
-    private val bargeInCooldownMs = 2000L
-
-    /**
-     * Eligibility gate, armed per playback site: true ONLY while an
-     * interruptible clip (neural/system TTS, voice log, settings test) is on
-     * the speaker. The siren beacon and live intercom frames force it false —
-     * the siren must not be interruptible and intercom stays half-duplex.
-     */
-    @Volatile
-    private var allowBargeIn = false
-
-    private var lastBargeInAtUptimeMs = 0L
-
-    /**
-     * Fired by the capture engine (once per guard episode after sustained
-     * loud frames) while self-playback holds the echo guard. Aborts the clip
-     * so the user is heard, then ends the guard so the mic re-arms after the
-     * existing decay. Loop-safety: the guard already guarantees no pre-abort
-     * frames are emitted or buffered — never back-fill audio here.
-     */
-    private fun handleBargeIn() {
-        if (!allowBargeIn || !isEchoGuardActive()) return
-        val now = SystemClock.uptimeMillis()
-        if (now - lastBargeInAtUptimeMs < bargeInCooldownMs) return
-        lastBargeInAtUptimeMs = now
-        Log.w("MissionControl", "Barge-in: interrupting self-playback")
-        ttsPlaybackJob?.cancel()
-        audioPlaybackEngine?.stopStream()
-        // TextToSpeech.stop() fires its onDone/onError, which reset
-        // allowBargeIn and end the guard for the system-TTS path.
-        viewModelScope.launch(Dispatchers.Main) {
-            if (systemTts?.isSpeaking == true) {
-                runCatching { systemTts?.stop() }
-            }
-        }
-        // ONNX/voice-log/test paths have no completion callback — end the
-        // guard here so the mic re-arms after the decay window.
-        endEchoGuard()
-    }
-
-    // =========================================================================
     // PHASE B: VOICE MESH (Mic/VAD -> On-Device STT -> Text Mesh -> Receiver TTS)
     // =========================================================================
 
@@ -1671,10 +1643,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
         // Pull-based echo guard: the capture thread checks playback state per frame.
         capture.echoGuardCheck = { isEchoGuardActive() }
-
-        // Acoustic barge-in: the engine fires once per guard episode after
-        // sustained loud frames; only interruptible clips arm the abort.
-        capture.onBargeInDetected = { handleBargeIn() }
 
         capture.onFrame = { frame ->
             // Echo guard (defense in depth — the engine also gates): never
@@ -2092,22 +2060,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                                     }
                                     _audioLevel.value = 0f
                                 }
-                                // Echo guard: exactly this clip's length (+decay) — the
-                                // loudspeaker audio must not loop back into the mesh.
+                                // Half-duplex echo guard: strictly suppress mic during loudspeaker playback (+decay).
                                 extendEchoGuard(totalDurationMs)
-                                // Barge-in eligible: near-mic speech may abort this clip.
-                                allowBargeIn = true
-                                try {
-                                    audioPlaybackEngine?.play(pcmBytes, OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
-                                } finally {
-                                    allowBargeIn = false
-                                }
+                                audioPlaybackEngine?.play(pcmBytes, OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
                                 visualizerJob.join()
+                                endEchoGuard()
                                 playedOnnx = true
                             } finally {
-                                // Cancellation-safe UI reset: also runs when
-                                // handleBargeIn cancels this coroutine mid-clip
-                                // (the visualizer child dies with the parent).
+                                // Cancellation-safe UI reset: ensures UI returns to STANDBY cleanly.
                                 withContext(Dispatchers.Main + NonCancellable) {
                                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                                     _audioLevel.value = 0f
@@ -2183,8 +2143,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 override fun onStart(utteranceId: String?) {
                     _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
                     // Utterance audio is actually on the speaker now: hold the
-                    // guard until onDone/onError (bounded by the 60s cap).
-                    extendEchoGuard(ttsMaxGuardMs)
+                    // guard until onDone/onError (bounded by estimated text duration + buffer).
+                    val estimatedDurationMs = maxOf(4000L, text.length * 150L + 2000L)
+                    extendEchoGuard(estimatedDurationMs)
                     // Start smooth visualizer animation loop
                     systemTtsVisualizerJob?.cancel()
                     systemTtsVisualizerJob = viewModelScope.launch {
@@ -2197,14 +2158,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     }
                 }
                 override fun onDone(utteranceId: String?) {
-                    allowBargeIn = false
                     endEchoGuard() // known completion: keep only the decay window
                     systemTtsVisualizerJob?.cancel()
                     _audioLevel.value = 0f
                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                 }
                 override fun onError(utteranceId: String?) {
-                    allowBargeIn = false
                     endEchoGuard() // known completion: keep only the decay window
                     systemTtsVisualizerJob?.cancel()
                     _audioLevel.value = 0f
@@ -2219,13 +2178,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             // Echo guard: cover the engine start-up window (queued utterance ->
             // audible audio); onStart/onDone/onError then drive it precisely.
             extendEchoGuard(ttsStartWindowMs)
-            // Barge-in eligible: near-mic speech may abort this utterance
-            // (stop() below triggers onDone/onError, which reset this).
-            allowBargeIn = true
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "itantra_${System.currentTimeMillis()}")
         } catch (e: Exception) {
             Log.e("MissionControl", "Error in speakWithSystemTts", e)
-            allowBargeIn = false
             endEchoGuard() // speak() may never have started — release the window
             systemTtsVisualizerJob?.cancel()
             _audioLevel.value = 0f
@@ -2267,10 +2222,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private fun startAudioBeacon(language: SupportedLanguage) {
         audioBeaconJob?.cancel()
         audioBeaconJob = viewModelScope.launch {
-            // The beacon announcement AND siren loop are never barge-in
-            // eligible — the siren must not be interruptible by near-mic
-            // speech (a barged siren would loop between phones).
-            allowBargeIn = false
             val playback = audioPlaybackEngine
             if (playback == null) {
                 // No audio output — the beacon is silent but the radio still runs.
@@ -2335,7 +2286,6 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private fun stopAudioBeacon() {
         audioBeaconJob?.cancel()
         audioBeaconJob = null
-        allowBargeIn = false // beacon clips were never interruptible — force-clear
         // Known-completion end: release the siren guard down to the decay window.
         endEchoGuard()
         if (!_isWalkieActive.value && !_isBroadcastingToAll.value && _connectedVictimIntercom.value == null) {
@@ -2631,14 +2581,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             } ?: return@launch
             // Echo guard: log playback through the loudspeaker is still self-audio.
             extendEchoGuard(pcm.size * 1000L / OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
-            // Barge-in eligible: near-mic speech may abort this clip.
-            allowBargeIn = true
             try {
                 audioPlaybackEngine?.play(shortsToPcmLittleEndian(pcm), OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
             } finally {
-                allowBargeIn = false
-                // Cancellation-safe UI reset: also runs when handleBargeIn
-                // aborts this clip mid-playback.
                 withContext(Dispatchers.Main + NonCancellable) {
                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                     _audioLevel.value = 0f
@@ -2680,14 +2625,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             } ?: return@launch
             // Echo guard: settings test tone would otherwise loop into STT.
             extendEchoGuard(pcm.size * 1000L / OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
-            // Barge-in eligible: near-mic speech may abort this clip.
-            allowBargeIn = true
             try {
                 audioPlaybackEngine?.play(shortsToPcmLittleEndian(pcm), OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
             } finally {
-                allowBargeIn = false
-                // Cancellation-safe UI reset: also runs when handleBargeIn
-                // aborts this clip mid-playback.
                 withContext(Dispatchers.Main + NonCancellable) {
                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                     _audioLevel.value = 0f
