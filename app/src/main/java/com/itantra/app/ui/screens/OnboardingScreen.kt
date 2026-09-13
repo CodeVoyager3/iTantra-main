@@ -34,8 +34,11 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContactPhone
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
@@ -47,6 +50,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -70,6 +74,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -105,6 +110,8 @@ fun OnboardingScreen(
     var isRelationDropdownOpen by remember { mutableStateOf(false) }
     var isLanguageSheetOpen by remember { mutableStateOf(false) }
     var languageSearchQuery by remember { mutableStateOf("") }
+    // Name + emergency contact live behind a collapsed OPTIONAL section.
+    var isOptionalExpanded by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // Validation
@@ -192,14 +199,14 @@ fun OnboardingScreen(
                     color = colors.textSecondary,
                     lineHeight = 18.sp,
                     modifier = Modifier.padding(horizontal = 8.dp),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    textAlign = TextAlign.Center
                 )
             }
 
             Spacer(modifier = Modifier.height(6.dp))
 
             // =======================================================
-            // 2. REQUIRED SECTION
+            // 2. REQUIRED SECTION — preferred language, age, gender
             // =======================================================
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 // Section Header
@@ -230,198 +237,206 @@ fun OnboardingScreen(
                     )
                 }
 
-                // Languages & Gender/Age Row
+                // Preferred language — full-width selector card
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .shadow(elevation = 2.dp, shape = RoundedCornerShape(18.dp), spotColor = Color(0x0A000000))
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(colors.surface)
+                        .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
+                        .clickable { isLanguageSheetOpen = true }
+                        .padding(16.dp)
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(
+                                    imageVector = Icons.Default.Language,
+                                    contentDescription = null,
+                                    tint = AccentBlue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "PREFERRED LANGUAGE",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Black,
+                                    letterSpacing = 0.6.sp,
+                                    color = colors.textSecondary
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Default.ArrowDropDown,
+                                contentDescription = "Open Language Dropdown",
+                                tint = colors.textSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        // Selected language chips
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            selectedLanguageCodes.take(4).forEach { code ->
+                                val lang = SupportedLanguage.fromCode(code)
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(BadgeMintContainer)
+                                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                                ) {
+                                    Text(
+                                        text = lang.nativeName,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = BadgeMintText
+                                    )
+                                }
+                            }
+                            if (selectedLanguageCodes.size > 4) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(colors.cardSecondaryBg)
+                                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                                ) {
+                                    Text(
+                                        text = "+${selectedLanguageCodes.size - 4}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textSecondary
+                                    )
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = "Tap to choose the dialects you speak or understand",
+                            fontSize = 11.sp,
+                            color = colors.textSecondary
+                        )
+                    }
+                }
+
+                // Age + Gender — equal-width cards on one row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Left Column (55%): Language Multiple Dropdown
+                    // Age
                     Box(
                         modifier = Modifier
-                            .weight(1.15f)
+                            .weight(1f)
                             .shadow(elevation = 2.dp, shape = RoundedCornerShape(18.dp), spotColor = Color(0x0A000000))
                             .clip(RoundedCornerShape(18.dp))
                             .background(colors.surface)
                             .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
-                            .clickable { isLanguageSheetOpen = true }
                             .padding(14.dp)
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Icon(
-                                        imageVector = Icons.Default.Language,
-                                        contentDescription = null,
-                                        tint = AccentBlue,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = "LANGUAGES",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Black,
-                                        letterSpacing = 0.6.sp,
-                                        color = colors.textSecondary
-                                    )
-                                }
-                                Icon(
-                                    imageVector = Icons.Default.ArrowDropDown,
-                                    contentDescription = "Open Language Dropdown",
-                                    tint = colors.textSecondary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-
-                            // Selected language chips
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                selectedLanguageCodes.take(3).forEach { code ->
-                                    val lang = SupportedLanguage.fromCode(code)
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(BadgeMintContainer)
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text(
-                                            text = lang.nativeName,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = BadgeMintText
-                                        )
-                                    }
-                                }
-                                if (selectedLanguageCodes.size > 3) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(colors.cardSecondaryBg)
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text(
-                                            text = "+${selectedLanguageCodes.size - 3}",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = colors.textSecondary
-                                        )
-                                    }
-                                }
-                            }
-
                             Text(
-                                text = "Tap to add / change dialects",
+                                text = "AGE",
                                 fontSize = 10.sp,
-                                color = colors.textSecondary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 0.6.sp,
+                                color = colors.textSecondary
+                            )
+                            OutlinedTextField(
+                                value = ageText,
+                                onValueChange = { input ->
+                                    if (input.length <= 3 && input.all { it.isDigit() }) {
+                                        ageText = input
+                                        if (showError) showError = false
+                                    }
+                                },
+                                placeholder = { Text("24", fontSize = 14.sp, color = colors.textSecondary.copy(alpha = 0.5f)) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                textStyle = LocalTextStyle.current.copy(fontSize = 14.sp, fontWeight = FontWeight.Bold),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = AccentBlue,
+                                    unfocusedBorderColor = colors.outline,
+                                    focusedContainerColor = colors.cardSecondaryBg,
+                                    unfocusedContainerColor = colors.cardSecondaryBg,
+                                    focusedTextColor = colors.textPrimary,
+                                    unfocusedTextColor = colors.textPrimary
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp)
                             )
                         }
                     }
 
-                    // Right Column (45%): Gender & Age
+                    // Gender
                     Box(
                         modifier = Modifier
-                            .weight(0.95f)
+                            .weight(1f)
                             .shadow(elevation = 2.dp, shape = RoundedCornerShape(18.dp), spotColor = Color(0x0A000000))
                             .clip(RoundedCornerShape(18.dp))
                             .background(colors.surface)
                             .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
                             .padding(14.dp)
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            // Gender Selector
-                            Column {
-                                Text(
-                                    text = "GENDER",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Black,
-                                    letterSpacing = 0.6.sp,
-                                    color = colors.textSecondary
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Box {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(colors.cardSecondaryBg)
-                                            .clickable { isGenderDropdownOpen = true }
-                                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = selectedGender,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = colors.textPrimary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Icon(
-                                            imageVector = Icons.Default.ArrowDropDown,
-                                            contentDescription = null,
-                                            tint = colors.textSecondary,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-
-                                    DropdownMenu(
-                                        expanded = isGenderDropdownOpen,
-                                        onDismissRequest = { isGenderDropdownOpen = false },
-                                        modifier = Modifier.background(colors.surface)
-                                    ) {
-                                        genderOptions.forEach { opt ->
-                                            DropdownMenuItem(
-                                                text = { Text(opt, fontSize = 13.sp, color = colors.textPrimary) },
-                                                onClick = {
-                                                    selectedGender = opt
-                                                    isGenderDropdownOpen = false
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Age Field
-                            Column {
-                                Text(
-                                    text = "AGE",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Black,
-                                    letterSpacing = 0.6.sp,
-                                    color = colors.textSecondary
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                OutlinedTextField(
-                                    value = ageText,
-                                    onValueChange = { input ->
-                                        if (input.length <= 3 && input.all { it.isDigit() }) {
-                                            ageText = input
-                                        }
-                                    },
-                                    placeholder = { Text("24", fontSize = 13.sp, color = colors.textSecondary.copy(alpha = 0.5f)) },
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = AccentBlue,
-                                        unfocusedBorderColor = colors.outline,
-                                        focusedContainerColor = colors.cardSecondaryBg,
-                                        unfocusedContainerColor = colors.cardSecondaryBg,
-                                        focusedTextColor = colors.textPrimary,
-                                        unfocusedTextColor = colors.textPrimary
-                                    ),
-                                    shape = RoundedCornerShape(10.dp),
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "GENDER",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 0.6.sp,
+                                color = colors.textSecondary
+                            )
+                            Box {
+                                Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(44.dp)
-                                )
+                                        .height(56.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(colors.cardSecondaryBg)
+                                        .border(1.dp, colors.outline, RoundedCornerShape(12.dp))
+                                        .clickable { isGenderDropdownOpen = true }
+                                        .padding(horizontal = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = selectedGender,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDropDown,
+                                        contentDescription = "Open Gender Dropdown",
+                                        tint = colors.textSecondary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+
+                                DropdownMenu(
+                                    expanded = isGenderDropdownOpen,
+                                    onDismissRequest = { isGenderDropdownOpen = false },
+                                    modifier = Modifier.background(colors.surface)
+                                ) {
+                                    genderOptions.forEach { opt ->
+                                        DropdownMenuItem(
+                                            text = { Text(opt, fontSize = 13.sp, color = colors.textPrimary) },
+                                            onClick = {
+                                                selectedGender = opt
+                                                isGenderDropdownOpen = false
+                                            }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -429,14 +444,20 @@ fun OnboardingScreen(
             }
 
             // =======================================================
-            // 3. OPTIONAL SECTION
+            // 3. OPTIONAL SECTION — collapsed by default
             // =======================================================
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                // Section Header
+                // Collapsed header (tap to expand); keeps the OPTIONAL chip style.
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(colors.surface)
+                        .border(1.dp, colors.outline, RoundedCornerShape(16.dp))
+                        .clickable { isOptionalExpanded = !isOptionalExpanded }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -452,199 +473,223 @@ fun OnboardingScreen(
                             color = BadgeIndigoText
                         )
                     }
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(1.dp)
-                            .background(colors.outline.copy(alpha = 0.5f))
-                    )
-                }
 
-                // Full Name / Callsign Card
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .shadow(elevation = 2.dp, shape = RoundedCornerShape(18.dp), spotColor = Color(0x0A000000))
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(colors.surface)
-                        .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
-                        .padding(16.dp)
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Icon(
-                                imageVector = Icons.Default.Person,
-                                contentDescription = null,
-                                tint = AccentBlue,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = "FULL NAME / CALLSIGN",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Black,
-                                letterSpacing = 0.8.sp,
-                                color = colors.textSecondary
-                            )
-                        }
-
-                        OutlinedTextField(
-                            value = name,
-                            onValueChange = {
-                                name = it
-                                if (showError) showError = false
-                            },
-                            placeholder = { Text("e.g. Rahul Sharma / Alpha-01", color = colors.textSecondary.copy(alpha = 0.5f)) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = AccentBlue,
-                                unfocusedBorderColor = colors.outline,
-                                focusedContainerColor = colors.cardSecondaryBg,
-                                unfocusedContainerColor = colors.cardSecondaryBg,
-                                focusedTextColor = colors.textPrimary,
-                                unfocusedTextColor = colors.textPrimary
-                            ),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Attached to emergency beacons so rescuers can call you by name over intercom.",
+                            text = "Full Name & Emergency Contact",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.textPrimary
+                        )
+                        Text(
+                            text = if (isOptionalExpanded) {
+                                "Tap to hide these fields"
+                            } else {
+                                "Tap to add your name and a family contact"
+                            },
                             fontSize = 11.sp,
                             color = colors.textSecondary
                         )
                     }
+
+                    Icon(
+                        imageVector = if (isOptionalExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (isOptionalExpanded) "Collapse optional fields" else "Expand optional fields",
+                        tint = colors.textSecondary,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
 
-                // Priority Emergency Contact Card
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .shadow(elevation = 2.dp, shape = RoundedCornerShape(18.dp), spotColor = Color(0x0A000000))
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(colors.surface)
-                        .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
-                        .padding(16.dp)
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                AnimatedVisibility(visible = isOptionalExpanded) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        // Full Name / Callsign Card
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .shadow(elevation = 2.dp, shape = RoundedCornerShape(18.dp), spotColor = Color(0x0A000000))
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(colors.surface)
+                                .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
+                                .padding(16.dp)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Icon(
-                                    imageVector = Icons.Default.ContactPhone,
-                                    contentDescription = null,
-                                    tint = AccentBlue,
-                                    modifier = Modifier.size(16.dp)
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Icon(
+                                        imageVector = Icons.Default.Person,
+                                        contentDescription = null,
+                                        tint = AccentBlue,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "FULL NAME / CALLSIGN",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        letterSpacing = 0.8.sp,
+                                        color = colors.textSecondary
+                                    )
+                                }
+
+                                OutlinedTextField(
+                                    value = name,
+                                    onValueChange = {
+                                        name = it
+                                        if (showError) showError = false
+                                    },
+                                    placeholder = { Text("e.g. Rahul Sharma / Alpha-01", color = colors.textSecondary.copy(alpha = 0.5f)) },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = AccentBlue,
+                                        unfocusedBorderColor = colors.outline,
+                                        focusedContainerColor = colors.cardSecondaryBg,
+                                        unfocusedContainerColor = colors.cardSecondaryBg,
+                                        focusedTextColor = colors.textPrimary,
+                                        unfocusedTextColor = colors.textPrimary
+                                    ),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
                                 )
+
                                 Text(
-                                    text = "EMERGENCY CONTACT",
+                                    text = "Shared with nearby mesh nodes so rescuers see your real name instead of a node id.",
                                     fontSize = 11.sp,
-                                    fontWeight = FontWeight.Black,
-                                    letterSpacing = 0.8.sp,
                                     color = colors.textSecondary
                                 )
                             }
-
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(BadgeIndigoContainer)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = "SOS TELEMETRY",
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Black,
-                                    color = BadgeIndigoText
-                                )
-                            }
                         }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        // Priority Emergency Contact Card
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .shadow(elevation = 2.dp, shape = RoundedCornerShape(18.dp), spotColor = Color(0x0A000000))
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(colors.surface)
+                                .border(1.dp, colors.outline, RoundedCornerShape(18.dp))
+                                .padding(16.dp)
                         ) {
-                            // Relation Dropdown
-                            Box(modifier = Modifier.weight(0.42f)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(56.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(colors.cardSecondaryBg)
-                                        .border(1.dp, colors.outline, RoundedCornerShape(12.dp))
-                                        .clickable { isRelationDropdownOpen = true }
-                                        .padding(horizontal = 12.dp),
+                                    modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(
-                                        text = selectedRelation,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = colors.textPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Default.ArrowDropDown,
-                                        contentDescription = null,
-                                        tint = colors.textSecondary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContactPhone,
+                                            contentDescription = null,
+                                            tint = AccentBlue,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "EMERGENCY CONTACT",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Black,
+                                            letterSpacing = 0.8.sp,
+                                            color = colors.textSecondary
+                                        )
+                                    }
 
-                                DropdownMenu(
-                                    expanded = isRelationDropdownOpen,
-                                    onDismissRequest = { isRelationDropdownOpen = false },
-                                    modifier = Modifier.background(colors.surface)
-                                ) {
-                                    relationOptions.forEach { rel ->
-                                        DropdownMenuItem(
-                                            text = { Text(rel, fontSize = 13.sp, color = colors.textPrimary) },
-                                            onClick = {
-                                                selectedRelation = rel
-                                                isRelationDropdownOpen = false
-                                            }
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(BadgeIndigoContainer)
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "SOS TELEMETRY",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = BadgeIndigoText
                                         )
                                     }
                                 }
-                            }
 
-                            // Phone Number
-                            OutlinedTextField(
-                                value = relativePhone,
-                                onValueChange = { input ->
-                                    if (input.length <= 15 && input.all { it.isDigit() || it == '+' || it == ' ' || it == '-' }) {
-                                        relativePhone = input
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    // Relation Dropdown
+                                    Box(modifier = Modifier.weight(0.42f)) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(56.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(colors.cardSecondaryBg)
+                                                .border(1.dp, colors.outline, RoundedCornerShape(12.dp))
+                                                .clickable { isRelationDropdownOpen = true }
+                                                .padding(horizontal = 12.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = selectedRelation,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = colors.textPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                            Icon(
+                                                imageVector = Icons.Default.ArrowDropDown,
+                                                contentDescription = "Open Relation Dropdown",
+                                                tint = colors.textSecondary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+
+                                        DropdownMenu(
+                                            expanded = isRelationDropdownOpen,
+                                            onDismissRequest = { isRelationDropdownOpen = false },
+                                            modifier = Modifier.background(colors.surface)
+                                        ) {
+                                            relationOptions.forEach { rel ->
+                                                DropdownMenuItem(
+                                                    text = { Text(rel, fontSize = 13.sp, color = colors.textPrimary) },
+                                                    onClick = {
+                                                        selectedRelation = rel
+                                                        isRelationDropdownOpen = false
+                                                    }
+                                                )
+                                            }
+                                        }
                                     }
-                                },
-                                placeholder = { Text("+91 98765 43210", fontSize = 13.sp, color = colors.textSecondary.copy(alpha = 0.5f)) },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = AccentBlue,
-                                    unfocusedBorderColor = colors.outline,
-                                    focusedContainerColor = colors.cardSecondaryBg,
-                                    unfocusedContainerColor = colors.cardSecondaryBg,
-                                    focusedTextColor = colors.textPrimary,
-                                    unfocusedTextColor = colors.textPrimary
-                                ),
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier
-                                    .weight(0.58f)
-                                    .height(56.dp)
-                            )
-                        }
 
-                        Text(
-                            text = "When SOS is triggered, rescue teams will be given this relative number to inform your family immediately upon detection.",
-                            fontSize = 11.sp,
-                            color = colors.textSecondary
-                        )
+                                    // Phone Number
+                                    OutlinedTextField(
+                                        value = relativePhone,
+                                        onValueChange = { input ->
+                                            if (input.length <= 15 && input.all { it.isDigit() || it == '+' || it == ' ' || it == '-' }) {
+                                                relativePhone = input
+                                            }
+                                        },
+                                        placeholder = { Text("+91 98765 43210", fontSize = 13.sp, color = colors.textSecondary.copy(alpha = 0.5f)) },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = AccentBlue,
+                                            unfocusedBorderColor = colors.outline,
+                                            focusedContainerColor = colors.cardSecondaryBg,
+                                            unfocusedContainerColor = colors.cardSecondaryBg,
+                                            focusedTextColor = colors.textPrimary,
+                                            unfocusedTextColor = colors.textPrimary
+                                        ),
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier
+                                            .weight(0.58f)
+                                            .height(56.dp)
+                                    )
+                                }
+
+                                Text(
+                                    text = "When SOS is triggered, rescue teams will be given this relative number to inform your family immediately upon detection.",
+                                    fontSize = 11.sp,
+                                    color = colors.textSecondary
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -720,13 +765,21 @@ fun OnboardingScreen(
                         letterSpacing = 1.sp
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "▶", fontSize = 12.sp)
+                    // Vector glyph instead of the "▶" character: the text glyph
+                    // has no coverage in every OEM font and rendered as tofu.
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
 
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.Center
             ) {
                 Box(
                     modifier = Modifier
@@ -734,11 +787,15 @@ fun OnboardingScreen(
                         .clip(CircleShape)
                         .background(Color(0xFF10B981))
                 )
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "100% On-Device Sovereign • Zero Cloud Stored • Editable in Settings",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
-                    color = colors.textSecondary
+                    color = colors.textSecondary,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
             }
 

@@ -66,6 +66,13 @@ object PacketFraming {
     const val MSG_TYPE_VOICE_LINK_CLOSE = 0x06
 
     /**
+     * Identity advert: payload is the compact `name|age|gender` UTF-8 string
+     * built by [ProfilePayload]. The 14-byte header + CRC32 layout is
+     * unchanged — this is only a new payload body type.
+     */
+    const val MSG_TYPE_PROFILE = 0x08
+
+    /**
      * Serializes [packet] into a single byte array, appending a CRC32
      * (little-endian, as produced by [java.util.zip.CRC32]) over the header
      * and payload.

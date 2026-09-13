@@ -1609,7 +1609,8 @@ fun RescueScreen(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Text(
-                                            text = "~${victim.distanceMeters}m away",
+                                            text = "~${victim.distanceMeters}m away" +
+                                                (victim.identityLabel?.let { " • $it" } ?: ""),
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.SemiBold,
                                             color = colors.accent
@@ -1933,7 +1934,8 @@ fun RescueScreen(
                                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
                                             Text(
-                                                text = "~${victimToInspect.distanceMeters}m away",
+                                                text = "~${victimToInspect.distanceMeters}m away" +
+                                                    (victimToInspect.identityLabel?.let { " • $it" } ?: ""),
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.SemiBold,
                                                 color = colors.accent

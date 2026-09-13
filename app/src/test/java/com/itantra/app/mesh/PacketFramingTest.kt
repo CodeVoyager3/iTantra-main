@@ -50,6 +50,44 @@ class PacketFramingTest {
     }
 
     @Test
+    fun profileFramesUseTheUnchangedHeaderLayout() {
+        // MSG_TYPE_PROFILE (0x08) must ride the same 14-byte header + CRC32
+        // trailer; adding the type must not shift any field.
+        val payload = "Ravi|34|Male".toByteArray(Charsets.UTF_8)
+        val packet = ItantraPacket(
+            nodeId = 0x00A1B2C3D4E5F607,
+            ttl = 5,
+            msgType = PacketFraming.MSG_TYPE_PROFILE,
+            payload = payload
+        )
+
+        val encoded = PacketFraming.encode(packet)
+        assertEquals(PacketFraming.HEADER_BYTES + payload.size + PacketFraming.CRC_BYTES, encoded.size)
+        assertEquals(PacketFraming.HEADER_BYTES, 14)
+        assertEquals(PacketFraming.MSG_TYPE_PROFILE, 0x08)
+        // MSG_TYPE sits at byte offset 11, big-endian payload length at 12..13.
+        assertEquals(0x08, encoded[11].toInt() and 0xFF)
+        assertEquals(payload.size, ((encoded[12].toInt() and 0xFF) shl 8) or (encoded[13].toInt() and 0xFF))
+
+        val decoded = PacketFraming.decode(encoded)
+        assertEquals(packet.nodeId, decoded?.nodeId)
+        assertEquals(packet.ttl, decoded?.ttl)
+        assertEquals(PacketFraming.MSG_TYPE_PROFILE, decoded?.msgType)
+        decoded?.let { assertArrayEquals(payload, it.payload) }
+    }
+
+    @Test
+    fun existingMessageTypesKeepTheirWireValues() {
+        // Guard against an accidental renumbering when adding MSG_TYPE_PROFILE.
+        assertEquals(0x01, PacketFraming.MSG_TYPE_DISTRESS_BEACON)
+        assertEquals(0x02, PacketFraming.MSG_TYPE_VOICE_FRAME)
+        assertEquals(0x03, PacketFraming.MSG_TYPE_TRANSLATED_TEXT)
+        assertEquals(0x04, PacketFraming.MSG_TYPE_VOICE_LINK_REQUEST)
+        assertEquals(0x05, PacketFraming.MSG_TYPE_VOICE_LINK_ACK)
+        assertEquals(0x06, PacketFraming.MSG_TYPE_VOICE_LINK_CLOSE)
+    }
+
+    @Test
     fun corruptedCrcFailsToDecode() {
         val encoded = PacketFraming.encode(
             ItantraPacket(

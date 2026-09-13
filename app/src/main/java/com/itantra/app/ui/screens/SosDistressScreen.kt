@@ -917,7 +917,9 @@ fun SosDistressScreen(
                                             text = if (isBroadcast) {
                                                 "1-Way Announcement • Listen Only"
                                             } else {
-                                                "${rescuer?.role ?: "iTantra Rescuer"} • ~${rescuer?.distanceMeters ?: 1}m away"
+                                                val identity = rescuer?.identityLabel
+                                                "${rescuer?.role ?: "iTantra Rescuer"} • ~${rescuer?.distanceMeters ?: 1}m away" +
+                                                    (identity?.let { " • $it" } ?: "")
                                             },
                                             fontSize = 12.sp,
                                             color = colors.textSecondary
@@ -1547,7 +1549,10 @@ fun SosDistressScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
                                     Box(
                                         modifier = Modifier
                                             .size(32.dp)
@@ -1571,7 +1576,8 @@ fun SosDistressScreen(
                                             color = colors.textPrimary
                                         )
                                         Text(
-                                            text = "${rescuer.role} • ${rescuer.distanceMeters}m away",
+                                            text = "${rescuer.role} • ${rescuer.distanceMeters}m away" +
+                                                (rescuer.identityLabel?.let { " • $it" } ?: ""),
                                             fontSize = 11.sp,
                                             color = colors.textSecondary
                                         )

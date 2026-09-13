@@ -40,8 +40,12 @@ import com.itantra.app.mesh.DiscoveredBeacon
 import com.itantra.app.mesh.DistressBeaconPayload
 import com.itantra.app.mesh.ItantraPacket
 import com.itantra.app.mesh.PacketFraming
+import com.itantra.app.mesh.PeerProfile
+import com.itantra.app.mesh.PeerProfileCache
+import com.itantra.app.mesh.ProfilePayload
 import com.itantra.app.mesh.VoiceFrame
 import com.itantra.app.mesh.WifiDirectMeshManager
+import com.itantra.app.mesh.fallbackNodeLabel
 import com.itantra.app.model.AlertPriority
 import com.itantra.app.model.ConnectionStatus
 import com.itantra.app.model.DistressVictim
@@ -398,6 +402,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
      * Single source of truth for what is on the air. Exactly one beacon can be
      * advertised at a time, so the active modes are ranked:
      * SOS distress > Rescue > Walkie presence > nothing.
+     *
+     * The identity profile advert follows the same lifecycle (any active mode
+     * advertises; no active mode stops it).
      */
     private fun syncBeaconAdvertising() {
         when {
@@ -409,6 +416,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             )
             else -> stopBeaconAdvertising()
         }
+        syncProfileBroadcast()
     }
 
     /**
@@ -1107,8 +1115,153 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     /** Tracks when each beacon nodeId was first seen, for "activeMinutes". */
     private val beaconFirstSeen = HashMap<Long, Long>()
 
-    private fun nodeCallsign(nodeId: Long): String =
-        "NODE-${(nodeId and 0xFFFF).toString(16).uppercase().padStart(4, '0')}"
+    /**
+     * Real identities received from peers over `MSG_TYPE_PROFILE`, keyed by
+     * node id. Until a profile arrives, peer labels keep the historic
+     * "NODE-XXXX" placeholder.
+     */
+    private val peerProfiles = PeerProfileCache()
+
+    /** Last time we answered a given node with our own profile (flood control). */
+    private val lastProfileSentToNode = LinkedHashMap<Long, Long>()
+
+    private fun nodeCallsign(nodeId: Long): String = peerProfiles.label(nodeId)
+
+    // =========================================================================
+    // IDENTITY PROFILE ADVERT (name/age/gender over the mesh)
+    // =========================================================================
+
+    /** This device's identity, straight from the persisted onboarding profile. */
+    private fun ownProfile(): PeerProfile = PeerProfile(
+        name = _uiState.value.userName.trim(),
+        age = _uiState.value.userAge,
+        gender = _uiState.value.userGender.trim()
+    )
+
+    /**
+     * Caches our own identity under our node id, so a label lookup for this
+     * device resolves to the saved name instead of the "NODE-XXXX" placeholder
+     * (the local message sender label stays the persisted call sign).
+     */
+    private fun cacheOwnProfile() {
+        val profile = ownProfile()
+        if (!profile.hasContent) return
+        peerProfiles.put(_nodeId.value, profile)
+    }
+
+    /**
+     * Broadcasts this device's identity on the mesh so peers stop showing
+     * "NODE-XXXX". A blank profile (pre-onboarding) is never sent.
+     */
+    private fun broadcastOwnProfile(targetNodeId: Long? = null) {
+        val profile = ownProfile()
+        if (!profile.hasContent) return
+        cacheOwnProfile()
+        val payload = ProfilePayload.encode(profile)
+        if (payload.isEmpty()) return
+        val packet = ItantraPacket(
+            nodeId = _nodeId.value,
+            ttl = _meshHopLimit.value,
+            msgType = PacketFraming.MSG_TYPE_PROFILE,
+            payload = payload
+        )
+        val encoded = PacketFraming.encode(packet)
+        logVoice("profile", "identity advert ${encoded.size}B -> ${targetNodeId?.let { fallbackNodeLabel(it) } ?: "all"}")
+        broadcastMeshPacket(encoded, targetNodeId)
+    }
+
+    /**
+     * Answers a newly discovered node with our profile, at most once per
+     * [PROFILE_PROMPT_MIN_INTERVAL_MS] so a chatty mesh cannot turn discovery
+     * into a profile storm.
+     */
+    private fun sendProfileToNodePromptly(nodeId: Long) {
+        if (nodeId == 0L || nodeId == _nodeId.value) return
+        if (peerProfiles.hasName(nodeId)) return
+        val now = System.currentTimeMillis()
+        // Called from both the BLE/UDP receive threads and the main thread.
+        val shouldSend = synchronized(lastProfileSentToNode) {
+            val lastSent = lastProfileSentToNode[nodeId] ?: 0L
+            if (now - lastSent < PROFILE_PROMPT_MIN_INTERVAL_MS) {
+                false
+            } else {
+                // Bounded: drop the oldest rate-limit entries, never the newest.
+                while (lastProfileSentToNode.size >= MAX_TRACKED_PROFILE_PEERS) {
+                    val oldest = lastProfileSentToNode.keys.firstOrNull() ?: break
+                    lastProfileSentToNode.remove(oldest)
+                }
+                lastProfileSentToNode[nodeId] = now
+                true
+            }
+        }
+        if (shouldSend) broadcastOwnProfile(targetNodeId = nodeId)
+    }
+
+    private var profileBroadcastJob: Job? = null
+
+    /** Starts/stops the periodic identity advert to match the active mode. */
+    private fun syncProfileBroadcast() {
+        val shouldAdvertise = _isSosBroadcasting.value || _isRescueActive.value || _isWalkieActive.value
+        if (!shouldAdvertise) {
+            profileBroadcastJob?.cancel()
+            profileBroadcastJob = null
+            return
+        }
+        if (profileBroadcastJob?.isActive == true) return
+        cacheOwnProfile()
+        profileBroadcastJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                broadcastOwnProfile()
+                delay(PROFILE_BROADCAST_INTERVAL_MS)
+            }
+        }
+    }
+
+    /**
+     * Re-labels every peer-derived UI entry once a profile arrives, so the name
+     * and age/gender appear without waiting for the next beacon scan.
+     */
+    private fun refreshPeerLabels() {
+        if (_activeDistressVictims.value.isNotEmpty()) {
+            _activeDistressVictims.update { victims -> victims.map { it.withPeerProfile() } }
+        }
+        _selectedVictim.update { it?.withPeerProfile() }
+        _connectedVictimIntercom.update { it?.withPeerProfile() }
+        if (_nearbyRescuers.value.isNotEmpty()) {
+            _nearbyRescuers.update { rescuers -> rescuers.map { it.withPeerProfile() } }
+        }
+        _connectedRescuer.update { it?.withPeerProfile() }
+        _discoveredWalkieDevices.update { peers -> peers.map { it.withPeerProfile() } }
+        _pairedWalkieDevices.update { peers -> peers.map { it.withPeerProfile() } }
+    }
+
+    private fun DistressVictim.withPeerProfile(): DistressVictim {
+        val profile = peerProfiles.get(nodeId) ?: return this
+        return copy(
+            callsign = nodeCallsign(nodeId),
+            age = profile.age,
+            gender = profile.gender
+        )
+    }
+
+    private fun RescuerNode.withPeerProfile(): RescuerNode {
+        val profile = peerProfiles.get(nodeId) ?: return this
+        return copy(
+            callsign = nodeCallsign(nodeId),
+            age = profile.age,
+            gender = profile.gender
+        )
+    }
+
+    private fun PeerDevice.withPeerProfile(): PeerDevice {
+        val nodeId = peerNodeId() ?: return this
+        val name = peerProfiles.name(nodeId) ?: return this
+        return copy(name = name, address = name)
+    }
+
+    /** BLE walkie peer ids carry their node id (`ble-<nodeId>`). */
+    private fun PeerDevice.peerNodeId(): Long? =
+        if (protocol == TransportProtocol.BLE) id.removePrefix("ble-").toLongOrNull() else null
 
     private val vibrator: Vibrator? by lazy {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1159,6 +1312,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             dist to calcBearing
         }
 
+        val profile = peerProfiles.get(nodeId)
         return DistressVictim(
             id = "beacon-$nodeId",
             nodeId = nodeId,
@@ -1173,18 +1327,47 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             relativeBearingDegrees = bearing,
             hazardType = "Distress Beacon",
             latitude = latitudeDeg,
-            longitude = longitudeDeg
+            longitude = longitudeDeg,
+            age = profile?.age,
+            gender = profile?.gender.orEmpty()
         )
     }
 
-    private fun DiscoveredBeacon.toRescuerNode(): RescuerNode = RescuerNode(
-        id = "resc-$nodeId",
-        callsign = nodeCallsign(nodeId),
-        distanceMeters = estimatedDistanceMeters.roundToInt().coerceAtLeast(1),
-        signalDbm = rssi,
-        role = "iTantra Rescuer",
-        isConnected = _connectedRescuer.value?.id == "resc-$nodeId"
-    )
+    private fun DiscoveredBeacon.toRescuerNode(): RescuerNode {
+        val profile = peerProfiles.get(nodeId)
+        return RescuerNode(
+            id = "resc-$nodeId",
+            nodeId = nodeId,
+            callsign = nodeCallsign(nodeId),
+            distanceMeters = estimatedDistanceMeters.roundToInt().coerceAtLeast(1),
+            signalDbm = rssi,
+            role = "iTantra Rescuer",
+            isConnected = _connectedRescuer.value?.id == "resc-$nodeId",
+            age = profile?.age,
+            gender = profile?.gender.orEmpty()
+        )
+    }
+
+    /**
+     * Builds a rescuer entry for a node id first heard over the mesh (a voice
+     * link or text packet) rather than a scanned beacon, reusing the scanned
+     * distance/signal when the beacon is already known.
+     */
+    private fun rescuerNodeFor(nodeId: Long, role: String): RescuerNode {
+        val existing = _nearbyRescuers.value.firstOrNull { it.id == "resc-$nodeId" }
+        val profile = peerProfiles.get(nodeId)
+        return RescuerNode(
+            id = "resc-$nodeId",
+            nodeId = nodeId,
+            callsign = nodeCallsign(nodeId),
+            distanceMeters = existing?.distanceMeters ?: 1,
+            signalDbm = existing?.signalDbm ?: -50,
+            role = role,
+            isConnected = true,
+            age = profile?.age ?: existing?.age,
+            gender = profile?.gender.orEmpty().ifBlank { existing?.gender.orEmpty() }
+        )
+    }
 
     private fun onBeaconsUpdated(beacons: List<DiscoveredBeacon>) {
         if (_isRescueActive.value) {
@@ -1267,17 +1450,27 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             updateWalkieLinkState()
         }
         beaconFirstSeen.keys.retainAll(beacons.map { it.nodeId }.toSet())
+
+        // Prompt identity exchange: a peer that just appeared gets our profile
+        // immediately instead of waiting for the next periodic advert. Flood
+        // control lives in sendProfileToNodePromptly (per-node rate limit).
+        if (_isSosBroadcasting.value || _isRescueActive.value || _isWalkieActive.value) {
+            beacons.forEach { sendProfileToNodePromptly(it.nodeId) }
+        }
     }
 
-    private fun DiscoveredBeacon.toWalkiePeer(linkedNodeIds: Set<Long>): PeerDevice = PeerDevice(
-        id = "ble-$nodeId",
-        name = nodeCallsign(nodeId),
-        address = nodeCallsign(nodeId),
-        protocol = TransportProtocol.BLE,
-        signalStrengthDbm = rssi,
-        isConnected = nodeId in linkedNodeIds,
-        batteryPercent = batteryPercent
-    )
+    private fun DiscoveredBeacon.toWalkiePeer(linkedNodeIds: Set<Long>): PeerDevice {
+        val displayName = nodeCallsign(nodeId)
+        return PeerDevice(
+            id = "ble-$nodeId",
+            name = displayName,
+            address = displayName,
+            protocol = TransportProtocol.BLE,
+            signalStrengthDbm = rssi,
+            isConnected = nodeId in linkedNodeIds,
+            batteryPercent = batteryPercent
+        )
+    }
 
     /** Keeps paired BLE radios showing live signal/battery/link state. */
     private fun refreshPairedWalkieDevices(
@@ -1373,6 +1566,11 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         lastPeerContactEpochMs = System.currentTimeMillis()
         updateWalkieLinkState()
 
+        // A peer we can hear but do not have a name for gets ours right away so
+        // both screens stop showing "NODE-XXXX" after one exchange. The reply is
+        // per-node rate-limited and suppressed once their name is cached.
+        sendProfileToNodePromptly(packet.nodeId)
+
         // Multi-hop mesh relay: deduplicate within 3-second window (exempt real-time voice frames)
         if (packet.msgType != PacketFraming.MSG_TYPE_VOICE_FRAME) {
             val packetSignature = ((packet.nodeId xor (packet.msgType.toLong() shl 16)) xor packet.payload.contentHashCode().toLong())
@@ -1399,6 +1597,21 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
 
         when (packet.msgType) {
+            PacketFraming.MSG_TYPE_PROFILE -> {
+                // Identity advert from a peer: cache it and re-label every
+                // peer-derived entry so names/age/gender appear immediately.
+                val profile = ProfilePayload.decode(packet.payload)
+                if (profile == null) {
+                    Log.w(voicePipelineTag, "[profile] unparseable advert from node=${packet.nodeId}")
+                } else {
+                    peerProfiles.put(packet.nodeId, profile)
+                    logVoice(
+                        "profile",
+                        "identity from node=${packet.nodeId}: name='${profile.name}' age=${profile.age} gender='${profile.gender}'"
+                    )
+                    refreshPeerLabels()
+                }
+            }
             PacketFraming.MSG_TYPE_TRANSLATED_TEXT -> {
                 refreshRescuerContact(packet.nodeId)
                 val rawPayload = String(packet.payload, Charsets.UTF_8)
@@ -1420,14 +1633,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                         val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
                         if (_connectedRescuer.value == null) {
                             _connectedRescuer.value = existing?.copy(isConnected = true)
-                                ?: RescuerNode(
-                                    id = rescuerId,
-                                    callsign = nodeCallsign(packet.nodeId),
-                                    distanceMeters = existing?.distanceMeters ?: 1,
-                                    signalDbm = existing?.signalDbm ?: -50,
-                                    role = "iTantra Rescuer (Broadcast)",
-                                    isConnected = true
-                                )
+                                ?: rescuerNodeFor(packet.nodeId, "iTantra Rescuer (Broadcast)")
                         }
                         syncVoiceCaptureState()
                     }
@@ -1502,14 +1708,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     val rescuerId = "resc-${packet.nodeId}"
                     val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
                     _connectedRescuer.value = existing?.copy(isConnected = true)
-                        ?: RescuerNode(
-                            id = rescuerId,
-                            callsign = nodeCallsign(packet.nodeId),
-                            distanceMeters = existing?.distanceMeters ?: 1,
-                            signalDbm = existing?.signalDbm ?: -50,
-                            role = "iTantra Rescuer",
-                            isConnected = true
-                        )
+                        ?: rescuerNodeFor(packet.nodeId, "iTantra Rescuer")
                     // Auto-engage victim microphone: ambient sounds and victim's voice
                     // are captured, transcribed via STT, and broadcast as text!
                     syncVoiceCaptureState()
@@ -2653,6 +2852,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     fun emergencyWipe() {
         viewModelScope.launch {
             clearLogs()
+            peerProfiles.clear()
+            lastProfileSentToNode.clear()
             _mapCacheSizeMb.value = 0
             modelDownloadManager.clearStates()
             modelStorageManager.wipeAll()
@@ -2746,6 +2947,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _nodeId.value = settingsRepository.ensureNodeId()
 
             settingsRepository.settings.collect { s ->
+                val identityBefore = _uiState.value.run { Triple(userName, userAge, userGender) }
                 _uiState.update {
                     it.copy(
                         themeMode = s.themeMode,
@@ -2760,6 +2962,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                         relativeRelation = s.relativeRelation,
                         relativePhone = s.relativePhone
                     )
+                }
+                // Keep our own labels name-based and, if the identity just
+                // changed while a mode is live, push the new profile out.
+                cacheOwnProfile()
+                if (identityBefore != Triple(s.userName, s.userAge, s.userGender) &&
+                    (_isSosBroadcasting.value || _isRescueActive.value || _isWalkieActive.value)
+                ) {
+                    broadcastOwnProfile()
                 }
                 _callsign.value = s.callsign
                 _txPower.value = s.txPower
@@ -2794,7 +3004,41 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             languages.firstOrNull()?.let { code ->
                 setSelectedLanguage(SupportedLanguage.fromCode(code))
             }
+            cacheOwnProfile()
+            startLanguagePackDownloads(languages)
         }
+    }
+
+    /**
+     * Kicks off the neural pack download for every selected language that is
+     * not already installed. Fire-and-forget by design: [downloadModel] only
+     * launches the download worker, so onboarding navigates immediately and
+     * progress shows up in the SOS/Walkie language sheets.
+     */
+    private suspend fun startLanguagePackDownloads(languageCodes: Set<String>) {
+        withContext(Dispatchers.IO) {
+            languageCodes.forEach { code ->
+                val tag = catalogueTagFor(code) ?: return@forEach
+                if (modelStorageManager.isInstalled(tag)) {
+                    Log.i(voicePipelineTag, "[model] pack already installed for $tag — skipping onboarding download")
+                    return@forEach
+                }
+                Log.i(voicePipelineTag, "[model] starting onboarding download for $tag")
+                downloadModel(tag)
+            }
+        }
+    }
+
+    /**
+     * Maps a [SupportedLanguage] code ("hi") onto the catalogue tag ("hi-IN").
+     * Returns null when the catalogue has no pack for that language.
+     */
+    private fun catalogueTagFor(languageCode: String): String? {
+        val catalogue = _catalogue.value
+        catalogue.firstOrNull { it.iso.equals(languageCode, ignoreCase = true) }?.let { return it.languageTag }
+        catalogue.firstOrNull { it.languageTag.startsWith("$languageCode-", ignoreCase = true) }
+            ?.let { return it.languageTag }
+        return catalogue.firstOrNull { it.languageTag.equals(languageCode, ignoreCase = true) }?.languageTag
     }
 
     private fun initModelHub() {
@@ -2930,6 +3174,19 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
         /** Received audio level is held this long after the last voice frame. */
         const val REMOTE_AUDIO_HOLD_MS = 400L
+
+        /**
+         * Identity advert cadence while any mesh mode is active: frequent enough
+         * that a peer resolves a name within a few seconds, slow enough not to
+         * flood the mesh (the payload is a few dozen bytes).
+         */
+        const val PROFILE_BROADCAST_INTERVAL_MS = 5_000L
+
+        /** Minimum gap between two unsolicited identity replies to the same node. */
+        const val PROFILE_PROMPT_MIN_INTERVAL_MS = 10_000L
+
+        /** Bound on the per-peer identity-reply rate-limit table. */
+        const val MAX_TRACKED_PROFILE_PEERS = 128
 
         /**
          * Level shown while the platform TTS engine speaks. Android's TTS

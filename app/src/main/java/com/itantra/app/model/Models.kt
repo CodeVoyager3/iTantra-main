@@ -244,8 +244,13 @@ data class DistressVictim(
     val hazardType: String = "Structural Collapse",
     val latitude: Double = 0.0,
     val longitude: Double = 0.0,
-    val nodeId: Long = 0L // mesh node id of the beacon this victim was derived from
-)
+    val nodeId: Long = 0L, // mesh node id of the beacon this victim was derived from
+    val age: Int? = null,   // from the peer's MSG_TYPE_PROFILE advert, when received
+    val gender: String = "" // from the peer's MSG_TYPE_PROFILE advert, when received
+) {
+    /** `34 • Male` (or whichever parts are known), null when both are unknown. */
+    val identityLabel: String? get() = identitySuffix(age, gender)
+}
 
 data class RescuerNode(
     val id: String,
@@ -253,8 +258,27 @@ data class RescuerNode(
     val distanceMeters: Int,
     val signalDbm: Int,
     val role: String = "NDRF Search & Rescue",
-    val isConnected: Boolean = false
-)
+    val isConnected: Boolean = false,
+    val nodeId: Long = 0L,  // mesh node id of the beacon this rescuer was derived from
+    val age: Int? = null,   // from the peer's MSG_TYPE_PROFILE advert, when received
+    val gender: String = "" // from the peer's MSG_TYPE_PROFILE advert, when received
+) {
+    /** `34 • Male` (or whichever parts are known), null when both are unknown. */
+    val identityLabel: String? get() = identitySuffix(age, gender)
+}
+
+/**
+ * Formats the peer identity tail shown next to a name, e.g. `34 • Male`.
+ * Returns null when neither part is known so callers can omit the line
+ * entirely instead of rendering a stray separator.
+ */
+fun identitySuffix(age: Int?, gender: String?): String? {
+    val parts = buildList {
+        age?.let { add(it.toString()) }
+        gender?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it) }
+    }
+    return parts.takeIf { it.isNotEmpty() }?.joinToString(" • ")
+}
 
 data class MissionTelemetry(
     val nodeCallsign: String = "ITANTRA-NODE-01",
