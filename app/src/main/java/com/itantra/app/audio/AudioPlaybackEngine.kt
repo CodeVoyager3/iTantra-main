@@ -111,6 +111,22 @@ class AudioPlaybackEngine(context: Context) {
     }
 
     /**
+     * Aborts any in-flight [play] stream — used by barge-in to cut off a
+     * self-played TTS clip mid-write. Pauses, flushes and releases only the
+     * stream track (tone track and audio routing/mode untouched); safe to
+     * call from any thread while a blocking write is in progress.
+     */
+    fun stopStream() {
+        val track = streamTrack
+        streamTrack = null
+        runCatching {
+            track?.pause()
+            track?.flush()
+            track?.release()
+        }
+    }
+
+    /**
      * Routes future playback: true = STREAM_MUSIC over the loudspeaker,
      * false = STREAM_VOICE_CALL with MODE_IN_COMMUNICATION + speakerphone on.
      */

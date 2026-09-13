@@ -13,6 +13,7 @@ import android.media.AudioManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -66,8 +67,7 @@ import com.itantra.app.modelhub.ModelStorageManager
 import com.itantra.app.service.TacticalMeshService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -236,6 +236,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         scope = viewModelScope,
         onPackInstalled = { languageTag ->
             settingsRepository.setInstalledLanguageTags(modelStorageManager.installedTags())
+            // Natural idle point: warm the freshly installed pack's TTS
+            // sessions so incoming messages never pay the session load.
+            prewarmTts(SupportedLanguage.fromCode(languageTag))
         }
     )
 
@@ -538,31 +541,31 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private val _vadStatus = MutableStateFlow(VadStatus.SILENCE)
     val vadStatus: StateFlow<VadStatus> = _vadStatus.asStateFlow()
 
-    // --- Live voice-mesh state (real engine signals, no simulated values) ---
-    /** True while at least one team peer holds a live link (GATT or recent UDP). */
-    private val _isWalkieLinkActive = MutableStateFlow(false)
-    val isWalkieLinkActive: StateFlow<Boolean> = _isWalkieLinkActive.asStateFlow()
+    private fun buildWalkieBeaconPayload(): DistressBeaconPayload = DistressBeaconPayload(
+        nodeId = _nodeId.value,
+        batteryPercent = currentBatteryPercent(),
+        latitudeDeg = _rescuerLat.value,
+        longitudeDeg = _rescuerLon.value,
+        altitudeMeters = _activeWalkieChannel.value,
+        languageIso = _uiState.value.selectedLanguage.code,
+        isDistress = false
+    )
 
-    /** True while live 20 ms voice frames are arriving from a peer. */
-    private val _isReceivingAudio = MutableStateFlow(false)
-    val isReceivingAudio: StateFlow<Boolean> = _isReceivingAudio.asStateFlow()
+    private fun startWalkieBeaconAdvertising() {
+        bleMeshManager?.startAdvertising(buildWalkieBeaconPayload(), BeaconTxPower.HIGH)
+    }
 
-    /** RMS level of the most recent received voice frame (0..1, decays to 0). */
-    private val _remoteAudioLevel = MutableStateFlow(0f)
-    val remoteAudioLevel: StateFlow<Float> = _remoteAudioLevel.asStateFlow()
-
-    /** Timestamp of the last packet accepted from any peer, for link liveness. */
-    @Volatile
-    private var lastPeerContactEpochMs = 0L
-
-    @Volatile
-    private var lastRemoteAudioFrameEpochMs = 0L
-    private var remoteAudioDecayJob: Job? = null
+    private fun stopWalkieBeaconAdvertising() {
+        if (!_isSosBroadcasting.value && !_isRescueActive.value) {
+            bleMeshManager?.stopAdvertising()
+        }
+    }
 
     fun toggleWalkieMaster(active: Boolean) {
         _isWalkieActive.value = active
         if (active) {
-            syncVoiceCaptureState()
+            startMeshVoiceCapture()
+            startWalkieBeaconAdvertising()
             wifiDirectMeshManager?.startDiscovery()
             wifiDirectMeshManager?.startUdpBroadcast()
             bleMeshManager?.startScanning() // BLE peers also appear as walkie nodes
@@ -575,6 +578,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 "mesh ON: presence beacon + scan + UDP on ${WifiDirectMeshManager.UDP_PORT} (nodeId=${_nodeId.value})"
             )
         } else {
+            stopWalkieBeaconAdvertising()
             wifiDirectMeshManager?.stopDiscovery()
             syncVoiceCaptureState()
             stopMeshUdpIfIdle()
@@ -602,6 +606,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
     fun startPtt() {
         startMeshVoiceCapture()
+        voiceFrameSequence = 0
         synchronized(voiceTurnBuffer ?: this) {
             voiceTurnBuffer?.reset()
         }
@@ -742,6 +747,20 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             wifiDirectMeshManager?.startUdpBroadcast()
             syncVoiceCaptureState() // Radar scanning: mic stays OFF until call or broadcast is initiated
         } else {
+            // Leaving rescue mode: broadcast a close (empty payload = everyone)
+            // so any victim still showing us connected drops immediately.
+            broadcastMeshPacket(
+                PacketFraming.encode(
+                    ItantraPacket(
+                        nodeId = _nodeId.value,
+                        ttl = _meshHopLimit.value,
+                        msgType = PacketFraming.MSG_TYPE_VOICE_LINK_CLOSE,
+                        payload = ByteArray(0)
+                    )
+                )
+            )
+            stopRescuerBeaconAdvertising()
+            stopBleScanIfIdle()
             _connectedVictimIntercom.value = null
             _isBroadcastingToAll.value = false
             _rescueConnectionMode.value = RescueConnectionMode.STANDBY
@@ -780,8 +799,22 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         } else {
             _modelWarningMessage.value = null
             _rescueConnectionMode.value = RescueConnectionMode.STANDBY
-            syncBeaconAdvertising()
-            syncVoiceCaptureState()
+            // Leaving broadcast-all: every victim that saw our -1 beacon may
+            // still have us connected — broadcast a close (empty payload =
+            // everyone) so they drop immediately instead of waiting on the
+            // beacon timeout.
+            broadcastMeshPacket(
+                PacketFraming.encode(
+                    ItantraPacket(
+                        nodeId = _nodeId.value,
+                        ttl = _meshHopLimit.value,
+                        msgType = PacketFraming.MSG_TYPE_VOICE_LINK_CLOSE,
+                        payload = ByteArray(0)
+                    )
+                )
+            )
+            startRescuerBeaconAdvertising()
+            stopMeshVoiceCaptureIfIdle()
             stopMeshUdpIfIdle()
         }
     }
@@ -1185,12 +1218,18 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
             // Check if any rescuer is actively connecting to us or broadcasting
             val myTargetMask = ((_nodeId.value and 0x3FFF) + 1).toInt()
-            val callingRescuer = rescuerBeacons.firstOrNull {
-                it.altitudeMeters == DistressBeaconPayload.ALTITUDE_RESCUER_BROADCAST_ALL ||
-                    it.altitudeMeters == myTargetMask
+            val callingBeacons = rescuerBeacons.filter {
+                it.altitudeMeters == -1 || it.altitudeMeters == myTargetMask
             }
-            val recentlyExplicitlyDisconnected = System.currentTimeMillis() - lastExplicitDisconnectEpochMs < 5000L
-            if (callingRescuer != null && !recentlyExplicitlyDisconnected) {
+            // Once a rescuer is connected, only THEIR beacon keeps the link
+            // alive — never silently swap to a different calling rescuer.
+            val connectedRescuerId = _connectedRescuer.value?.id
+            val callingRescuer = if (connectedRescuerId != null) {
+                callingBeacons.firstOrNull { "resc-${it.nodeId}" == connectedRescuerId }
+            } else {
+                callingBeacons.firstOrNull()
+            }
+            if (callingRescuer != null) {
                 val node = callingRescuer.toRescuerNode().copy(isConnected = true)
                 _connectedRescuer.value = node
                 _isReceivingOneWayBroadcast.value =
@@ -1291,6 +1330,20 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     private var lastRescuerContactEpochMs = 0L
+
+    /**
+     * Refreshes the connected-rescuer freshness timestamp. Scoped to packets
+     * from the connected rescuer (or any rescuer while nobody is connected
+     * yet) so mesh chatter from third devices — walkie traffic, other victims,
+     * garbage STT text — can never keep a dead link alive past the 4s timeout.
+     */
+    private fun refreshRescuerContact(packetNodeId: Long) {
+        val connected = _connectedRescuer.value
+        if (connected == null || connected.id == "resc-$packetNodeId") {
+            lastRescuerContactEpochMs = System.currentTimeMillis()
+        }
+    }
+
     private val recentRelayedPackets = LinkedHashMap<Long, Long>()
 
     private fun handleIncomingDatagram(bytes: ByteArray, sourceAddress: String? = null) {
@@ -1312,35 +1365,34 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         lastPeerContactEpochMs = System.currentTimeMillis()
         updateWalkieLinkState()
 
-        // Multi-hop mesh relay: deduplicate within 3-second window
-        val packetSignature = ((packet.nodeId xor (packet.msgType.toLong() shl 16)) xor packet.payload.contentHashCode().toLong())
-        val now = System.currentTimeMillis()
-        val isDuplicate = synchronized(recentRelayedPackets) {
-            val lastSeen = recentRelayedPackets[packetSignature]
-            if (lastSeen != null && (now - lastSeen) < 3000L) {
-                true
-            } else {
-                if (recentRelayedPackets.size > 256) {
-                    val firstKey = recentRelayedPackets.keys.firstOrNull()
-                    if (firstKey != null) recentRelayedPackets.remove(firstKey)
+        // Multi-hop mesh relay: deduplicate within 3-second window (exempt real-time voice frames)
+        if (packet.msgType != PacketFraming.MSG_TYPE_VOICE_FRAME) {
+            val packetSignature = ((packet.nodeId xor (packet.msgType.toLong() shl 16)) xor packet.payload.contentHashCode().toLong())
+            val now = System.currentTimeMillis()
+            val isDuplicate = synchronized(recentRelayedPackets) {
+                val lastSeen = recentRelayedPackets[packetSignature]
+                if (lastSeen != null && (now - lastSeen) < 3000L) {
+                    true
+                } else {
+                    if (recentRelayedPackets.size > 256) {
+                        val firstKey = recentRelayedPackets.keys.firstOrNull()
+                        if (firstKey != null) recentRelayedPackets.remove(firstKey)
+                    }
+                    recentRelayedPackets[packetSignature] = now
+                    false
                 }
-                recentRelayedPackets[packetSignature] = now
-                false
             }
-        }
-        if (isDuplicate) return // Deduplicate within 3 seconds
+            if (isDuplicate) return // Deduplicate within 3 seconds
 
-        if (packet.ttl > 1 && packet.msgType != PacketFraming.MSG_TYPE_VOICE_FRAME) {
-            // Live 20 ms voice frames are deliberately NOT relayed: re-broadcasting
-            // 50 packets/s per hop would saturate the mesh, and the STT -> text
-            // packet is the designated long-range path.
-            val relayedPacket = packet.copy(ttl = packet.ttl - 1)
-            broadcastMeshPacket(PacketFraming.encode(relayedPacket))
+            if (packet.ttl > 1) {
+                val relayedPacket = packet.copy(ttl = packet.ttl - 1)
+                broadcastMeshPacket(PacketFraming.encode(relayedPacket))
+            }
         }
 
         when (packet.msgType) {
             PacketFraming.MSG_TYPE_TRANSLATED_TEXT -> {
-                lastRescuerContactEpochMs = System.currentTimeMillis()
+                refreshRescuerContact(packet.nodeId)
                 val rawPayload = String(packet.payload, Charsets.UTF_8)
                 val (langCode, text) = if (rawPayload.contains('|')) {
                     val parts = rawPayload.split('|', limit = 2)
@@ -1388,32 +1440,37 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                         "transcript + log updated from ${nodeCallsign(packet.nodeId)} (channelState=RECEIVING)"
                     )
 
-                    logVoice("tts", "speaking text with TTS from ${nodeCallsign(packet.nodeId)}")
-                    // Re-create audio locally on receiver using TTS (low-bitrate text-only mesh)
-                    recreateAudioWithTts(text, langCode)
+                    // Re-create audio locally on receiver using TTS! Legacy
+                    // senders can still emit sub-word STT noise (a stray 'क')
+                    // — store it above but never speak it. Deliberate
+                    // quick-chip/dictation texts are real words and pass.
+                    if (text.count { it.isLetterOrDigit() } >= 2) {
+                        recreateAudioWithTts(text, langCode)
+                    } else {
+                        Log.d("MissionControl", "TRANSLATED_TEXT: skipping TTS for noise text '$text' from ${nodeCallsign(packet.nodeId)}")
+                    }
                 }
             }
             PacketFraming.MSG_TYPE_VOICE_FRAME -> {
-                lastRescuerContactEpochMs = System.currentTimeMillis()
-                val frame = VoiceFrame.decode(packet.payload)
-                if (frame == null || frame.pcm.isEmpty()) {
-                    Log.w(voicePipelineTag, "[decode] dropping malformed voice frame (${packet.payload.size}B)")
-                } else {
-                    liveAudioWindow.noteVoiceFrame(packet.nodeId, now)
-                    audioPlaybackEngine?.play(frame.pcm, AudioCaptureEngine.SAMPLE_RATE_HZ)
-                    markReceivingAudio(calculateRmsLevel(frame.pcm))
-                    _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
-                    Log.v(
-                        voicePipelineTag,
-                        "[play] voice frame seq=${frame.sequence} pcm=${frame.pcm.size}B from ${nodeCallsign(packet.nodeId)}"
-                    )
-                }
+                refreshRescuerContact(packet.nodeId)
+                val decoded = VoiceFrame.decode(packet.payload)
+                val pcm = decoded?.pcm ?: packet.payload
+                // Echo guard: half-duplex intercom — suppress our mic while
+                // this frame plays, or the speaker feeds the mic and the
+                // live voice stream loops between phones.
+                extendEchoGuard(pcm.size * 1000L / (AudioCaptureEngine.SAMPLE_RATE_HZ * 2))
+                // Live intercom is never barge-in eligible — it stays half-duplex.
+                allowBargeIn = false
+                audioPlaybackEngine?.play(pcm, AudioCaptureEngine.SAMPLE_RATE_HZ)
+                val rms = calculateRmsLevel(pcm)
+                _audioLevel.value = rms
+                _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
             }
             PacketFraming.MSG_TYPE_VOICE_LINK_REQUEST -> {
                 // A rescuer is opening an intercom toward this device (we are
                 // the victim). Mark them connected!
                 if (_isSosBroadcasting.value) {
-                    lastRescuerContactEpochMs = System.currentTimeMillis()
+                    refreshRescuerContact(packet.nodeId)
                     val rescuerId = "resc-${packet.nodeId}"
                     val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
                     _connectedRescuer.value = existing?.copy(isConnected = true)
@@ -1449,7 +1506,23 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 }
             }
             PacketFraming.MSG_TYPE_VOICE_LINK_CLOSE -> {
-                if (_connectedRescuer.value?.id == "resc-${packet.nodeId}") {
+                // Payload carries the 8-byte big-endian target victim nodeId;
+                // an empty payload is a broadcast close (e.g. rescuer leaving
+                // broadcast-all or exiting rescue mode). A close meant for
+                // another victim must never clear our connection — and only
+                // the connected rescuer can drop us at all.
+                val senderIsConnected = _connectedRescuer.value?.id == "resc-${packet.nodeId}"
+                val closeTargetsUs = if (packet.payload.isEmpty()) {
+                    true
+                } else {
+                    val targetNodeId = try {
+                        ByteBuffer.wrap(packet.payload).order(ByteOrder.BIG_ENDIAN).long
+                    } catch (_: Exception) {
+                        _nodeId.value // unparseable payload: fall back to the sender-id check alone
+                    }
+                    targetNodeId == _nodeId.value
+                }
+                if (senderIsConnected && closeTargetsUs) {
                     _connectedRescuer.value = null
                     syncVoiceCaptureState()
                 }
@@ -1500,11 +1573,100 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     // =========================================================================
+    // ECHO GUARD (deterministic playback-state capture suppression)
+    // =========================================================================
+    //
+    // While this device plays audio out of its loudspeaker (TTS, siren,
+    // intercom voice), its own always-on mic hears that playback. Platform AEC
+    // cannot cancel media-route (USAGE_MEDIA + MODE_NORMAL) playback, so the
+    // captured audio would re-enter the mesh and loop between phones. This is
+    // solved time-based (never by comparing audio or transcripts): every
+    // playback site extends a monotonic guard window before the audio starts,
+    // and both the capture engine and the mesh TX paths gate on it — a
+    // half-duplex radio while self-playback is active.
+
+    /** AudioTrack drain + speaker/reverb tail appended to every guard window. */
+    private val echoGuardDecayMs = 500L
+
+    /** System-TTS engine latency before utterance audio actually starts. */
+    private val ttsStartWindowMs = 2000L
+
+    /** Siren-loop coverage: one full two-tone iteration (~2.0s) plus jitter. */
+    private val sirenToneGuardMs = 2000L
+
+    /** Absolute cap for system TTS (a real onDone/onError ends the guard early). */
+    private val ttsMaxGuardMs = 60_000L
+
+    /** Monotonic uptime (SystemClock.uptimeMillis) until which capture is suppressed. */
+    @Volatile
+    private var echoGuardUntil = 0L
+
+    /** Extends the guard to cover [durationMs] of imminent self-playback. */
+    private fun extendEchoGuard(durationMs: Long) {
+        val until = SystemClock.uptimeMillis() + durationMs + echoGuardDecayMs
+        echoGuardUntil = maxOf(echoGuardUntil, until)
+    }
+
+    /** Known-completion end (TTS onDone/onError, beacon stopped): keep only the decay window. */
+    private fun endEchoGuard() {
+        val now = SystemClock.uptimeMillis()
+        echoGuardUntil = minOf(echoGuardUntil, now + echoGuardDecayMs)
+    }
+
+    private fun isEchoGuardActive(): Boolean = SystemClock.uptimeMillis() < echoGuardUntil
+
+    // =========================================================================
+    // BARGE-IN (near-mic speech aborts our own clip playback)
+    // =========================================================================
+
+    /** Minimum gap between barge-in aborts so one shout cannot machine-gun. */
+    private val bargeInCooldownMs = 2000L
+
+    /**
+     * Eligibility gate, armed per playback site: true ONLY while an
+     * interruptible clip (neural/system TTS, voice log, settings test) is on
+     * the speaker. The siren beacon and live intercom frames force it false —
+     * the siren must not be interruptible and intercom stays half-duplex.
+     */
+    @Volatile
+    private var allowBargeIn = false
+
+    private var lastBargeInAtUptimeMs = 0L
+
+    /**
+     * Fired by the capture engine (once per guard episode after sustained
+     * loud frames) while self-playback holds the echo guard. Aborts the clip
+     * so the user is heard, then ends the guard so the mic re-arms after the
+     * existing decay. Loop-safety: the guard already guarantees no pre-abort
+     * frames are emitted or buffered — never back-fill audio here.
+     */
+    private fun handleBargeIn() {
+        if (!allowBargeIn || !isEchoGuardActive()) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastBargeInAtUptimeMs < bargeInCooldownMs) return
+        lastBargeInAtUptimeMs = now
+        Log.w("MissionControl", "Barge-in: interrupting self-playback")
+        ttsPlaybackJob?.cancel()
+        audioPlaybackEngine?.stopStream()
+        // TextToSpeech.stop() fires its onDone/onError, which reset
+        // allowBargeIn and end the guard for the system-TTS path.
+        viewModelScope.launch(Dispatchers.Main) {
+            if (systemTts?.isSpeaking == true) {
+                runCatching { systemTts?.stop() }
+            }
+        }
+        // ONNX/voice-log/test paths have no completion callback — end the
+        // guard here so the mic re-arms after the decay window.
+        endEchoGuard()
+    }
+
+    // =========================================================================
     // PHASE B: VOICE MESH (Mic/VAD -> On-Device STT -> Text Mesh -> Receiver TTS)
     // =========================================================================
 
     /** Accumulates the current speech utterance for neural transcription. */
     private var voiceTurnBuffer: ByteArrayOutputStream? = null
+    private var voiceFrameSequence = 0
 
     private fun startMeshVoiceCapture() {
         val capture = audioCaptureEngine ?: return
@@ -1514,10 +1676,29 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         // Make sure the outbound live-audio pump is running before frames arrive.
         voiceFrameSenderJob
 
+        // Pull-based echo guard: the capture thread checks playback state per frame.
+        capture.echoGuardCheck = { isEchoGuardActive() }
+
+        // Acoustic barge-in: the engine fires once per guard episode after
+        // sustained loud frames; only interruptible clips arm the abort.
+        capture.onBargeInDetected = { handleBargeIn() }
+
         capture.onFrame = { frame ->
-            // Low-bitrate text-only mesh: speech frames accumulate locally for on-device STT.
-            if (!_isMicMuted.value && _isVadSpeaking.value) {
-                val currentSize: Int
+            // Echo guard (defense in depth — the engine also gates): never
+            // retransmit or transcribe audio captured during self-playback.
+            if (!_isMicMuted.value && (_isVadSpeaking.value || _isPttActive.value) && !isEchoGuardActive()) {
+                // 1. Live audio streaming over high-speed UDP mesh
+                val voicePayload = VoiceFrame.encode(voiceFrameSequence++, frame)
+                val voicePacket = ItantraPacket(
+                    nodeId = _nodeId.value,
+                    ttl = 2,
+                    msgType = PacketFraming.MSG_TYPE_VOICE_FRAME,
+                    payload = voicePayload
+                )
+                val encodedVoice = PacketFraming.encode(voicePacket)
+                wifiDirectMeshManager?.broadcastDatagram(encodedVoice)
+
+                // 2. Accumulate utterance for neural transcription
                 synchronized(voiceTurnBuffer ?: this) {
                     voiceTurnBuffer?.write(frame, 0, frame.size)
                     currentSize = voiceTurnBuffer?.size() ?: 0
@@ -1531,23 +1712,18 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             }
         }
         capture.onSpeechStateChanged = { speaking ->
-            _isVadSpeaking.value = speaking
-            _vadStatus.value = if (speaking) VadStatus.SPEECH_DETECTED else VadStatus.SILENCE
-            _isTransmitting.value = speaking && !_isMicMuted.value
-            if (speaking) {
-                voiceTurnCoordinator.onSpeechStarted()
-                voiceStreamGate.beginTurn()
-            } else {
-                voiceTurnCoordinator.onSpeechEnded()
-            }
-            _uiState.update { state ->
-                val next = state.copy(
-                    channelState = if (speaking) RadioChannelState.TRANSMITTING else RadioChannelState.STANDBY
-                )
-                if (speaking && !_isMicMuted.value && !_isPttActive.value) {
-                    next.withStatus(VoiceStatus.LISTENING)
-                } else {
-                    next.clearStatus()
+            // Echo guard (defense in depth): ignore turn starts while our own
+            // playback is active — the engine already suppresses the trigger.
+            if (!isEchoGuardActive()) {
+                if (speaking) voiceFrameSequence = 0
+                _isVadSpeaking.value = speaking
+                _vadStatus.value = if (speaking) VadStatus.SPEECH_DETECTED else VadStatus.SILENCE
+                _isTransmitting.value = speaking && !_isMicMuted.value
+                _uiState.update {
+                    it.copy(
+                        channelState = if (speaking) RadioChannelState.TRANSMITTING else RadioChannelState.STANDBY,
+                        currentTranscript = if (speaking && !_isMicMuted.value && !_isPttActive.value) "🎙️ Listening..." else it.currentTranscript
+                    )
                 }
             }
         }
@@ -1679,6 +1855,18 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    /** True for punctuation characters (ignored by the post-STT noise ratio). */
+    private fun Char.isPunctuationMark(): Boolean = when (category) {
+        CharCategory.CONNECTOR_PUNCTUATION,
+        CharCategory.DASH_PUNCTUATION,
+        CharCategory.START_PUNCTUATION,
+        CharCategory.END_PUNCTUATION,
+        CharCategory.INITIAL_QUOTE_PUNCTUATION,
+        CharCategory.FINAL_QUOTE_PUNCTUATION,
+        CharCategory.OTHER_PUNCTUATION -> true
+        else -> false
+    }
+
     /**
      * Gating for inbound text playback: ensures the phone only plays voice through
      * the loudspeaker when the local mode expects voice (active call, broadcast, or walkie).
@@ -1702,15 +1890,25 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
      * wide-range resilience channel, in parallel with the live audio frames.
      */
     private fun flushVoiceTurn() {
+        // Echo guard (defense in depth): a turn that ended during our own
+        // playback is echo audio — discard it, no STT, no mesh broadcast.
+        if (isEchoGuardActive()) {
+            Log.d("MissionControl", "echo guard active, discarding buffered turn")
+            synchronized(voiceTurnBuffer ?: this) {
+                voiceTurnBuffer?.reset()
+            }
+            return
+        }
         val buffer = voiceTurnBuffer ?: return
         val pcmBytes: ByteArray
         synchronized(buffer) {
             pcmBytes = buffer.toByteArray()
             buffer.reset()
         }
-        // Discard turns below minimum speech threshold (200ms = 6400 bytes)
-        if (pcmBytes.size < voiceTurnCoordinator.minTurnBytes) {
-            logVoice("stt", "discarded turn below threshold (<200ms, ${pcmBytes.size} bytes)")
+        // Discard tiny noise bursts (< 250ms of audio = 8000 bytes) before
+        // they reach STT and come out as garbage single characters
+        if (pcmBytes.size < 8000) {
+            Log.d("MissionControl", "flushVoiceTurn: Discarding noise burst (<250ms, ${pcmBytes.size} bytes)")
             viewModelScope.launch(Dispatchers.Main) {
                 if (_uiState.value.voiceStatus != null) {
                     _uiState.update { it.copy(currentTranscript = "").clearStatus() }
@@ -1760,10 +1958,17 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 return@launch
             }
 
-            // Filter out blank or single-character noise artifacts (like stray 'ह' or punctuation)
+            // Post-STT noise gate: STT renders noise bursts as sub-word
+            // artifacts (a stray 'क', 'कक', 'a1', bare punctuation) which
+            // every receiving phone would SPEAK via TTS. Require at least 2
+            // letters/digits making up at least ~40% of the content length
+            // (whitespace/punctuation ignored) before this turn broadcasts.
             val cleanText = transcribedText.trim()
-            if (cleanText.isBlank() || (cleanText.length == 1 && !cleanText[0].isLetterOrDigit())) {
-                Log.d(voicePipelineTag, "[stt] blank/noise output ('$cleanText'), dropping turn")
+            val alnumCount = cleanText.count { it.isLetterOrDigit() }
+            val strippedLength = cleanText.count { !it.isWhitespace() && !it.isPunctuationMark() }
+            val alnumRatio = if (strippedLength > 0) alnumCount.toFloat() / strippedLength else 0f
+            if (cleanText.isBlank() || alnumCount < 2 || alnumRatio < 0.4f) {
+                Log.d("MissionControl", "flushVoiceTurn: Noise transcription ('$cleanText', alnum=$alnumCount/$strippedLength), dropping turn")
                 withContext(Dispatchers.Main) {
                     when {
                         _isPttActive.value ->
@@ -1868,35 +2073,113 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 return@launch
             }
 
-            // 2. Fallback to OnnxInferenceManager TTS if system TTS is not ready
-            val onnx = onnxInferenceManager
-            if (onnx != null && modelStorageManager.isInstalled(langCode)) {
+            // Direct on-disk gate (never the installedPacks flow): the flow
+            // starts empty and is only filled by an async rescan, so a packet
+            // arriving before that scan would be misrouted to system TTS.
+            val packOnDisk = modelStorageManager.isInstalledOnDisk(langCode)
+            if (onnx == null) {
+                Log.w("MissionControl", "recreateAudioWithTts: onnx runtime unavailable for '$langCode' — falling back to system TTS")
+            } else if (!packOnDisk) {
+                Log.w("MissionControl", "recreateAudioWithTts: neural TTS pack not on disk for '$langCode' — falling back to system TTS")
+                val langName = SupportedLanguage.fromCode(langCode).englishName
+                withContext(Dispatchers.Main) {
+                    _modelWarningMessage.value =
+                        "Neural TTS pack for $langName is NOT downloaded — playing with system voice. Download the pack in Settings → Models."
+                }
+            } else {
                 try {
                     val loaded = onnx.loadTts(langCode) || onnx.loadTts("${langCode}-IN")
-                    if (loaded) {
+                    if (!loaded) {
+                        Log.w("MissionControl", "recreateAudioWithTts: loadTts failed for '$langCode' — falling back to system TTS")
+                    } else {
                         val pcmShorts = onnx.synthesize(text)
-                        if (pcmShorts != null && pcmShorts.isNotEmpty()) {
+                        if (pcmShorts == null || pcmShorts.isEmpty()) {
+                            Log.w("MissionControl", "recreateAudioWithTts: synthesize returned null for '$langCode' — falling back to system TTS")
+                        } else {
                             val pcmBytes = shortsToPcmLittleEndian(pcmShorts)
                             withContext(Dispatchers.Main) {
                                 _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
                             }
-                            // Visualizer level measured from the synthesized PCM
-                            // itself (no synthetic animation).
-                            _audioLevel.value = calculateRmsLevel(pcmBytes)
-                            audioPlaybackEngine?.play(pcmBytes, OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
-                            val totalDurationMs =
-                                (pcmBytes.size * 1000L) / (OnnxInferenceManager.TTS_SAMPLE_RATE_HZ * 2)
-                            delay(totalDurationMs.coerceAtLeast(80L))
-                            _audioLevel.value = 0f
-                            withContext(Dispatchers.Main) {
-                                _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
+                            try {
+                                // Visualizer pulse during playback
+                                val totalDurationMs = (pcmBytes.size * 1000L) / (OnnxInferenceManager.TTS_SAMPLE_RATE_HZ * 2)
+                                val visualizerJob = launch {
+                                    val chunkDurationMs = 50L
+                                    val steps = (totalDurationMs / chunkDurationMs).toInt().coerceAtLeast(1)
+                                    for (i in 0 until steps) {
+                                        _audioLevel.value = (0.25f + 0.5f * kotlin.math.sin(i * 0.4).toFloat().coerceIn(0f, 1f))
+                                        delay(chunkDurationMs)
+                                    }
+                                    _audioLevel.value = 0f
+                                }
+                                // Echo guard: exactly this clip's length (+decay) — the
+                                // loudspeaker audio must not loop back into the mesh.
+                                extendEchoGuard(totalDurationMs)
+                                // Barge-in eligible: near-mic speech may abort this clip.
+                                allowBargeIn = true
+                                try {
+                                    audioPlaybackEngine?.play(pcmBytes, OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
+                                } finally {
+                                    allowBargeIn = false
+                                }
+                                visualizerJob.join()
+                                playedOnnx = true
+                            } finally {
+                                // Cancellation-safe UI reset: also runs when
+                                // handleBargeIn cancels this coroutine mid-clip
+                                // (the visualizer child dies with the parent).
+                                withContext(Dispatchers.Main + NonCancellable) {
+                                    _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
+                                    _audioLevel.value = 0f
+                                }
                             }
                         }
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    Log.w("MissionControl", "recreateAudioWithTts: ONNX TTS exception for '$langCode' — falling back to system TTS", e)
+                    playedOnnx = false
+                }
+            }
+
+            if (!playedOnnx) {
+                withContext(Dispatchers.Main) {
+                    speakWithSystemTts(text, langCode)
+                }
             }
         }
     }
+
+    private var ttsPrewarmJob: Job? = null
+
+    /**
+     * Warms the FastPitch + HiFi-GAN ONNX sessions for [language] in the
+     * background (language change / pack install / post-rescan startup) so an
+     * incoming mesh message hits the loaded-session cache instead of paying
+     * the multi-second session load inside the playback coroutine.
+     *
+     * Idempotent (loadTts short-circuits when already loaded), cancellable,
+     * and skipped while any TTS playback is active so it never tears down
+     * sessions an in-flight synthesize() is still using. The short idle delay
+     * lets an STT flush win the shared @Synchronized manager lock first.
+     */
+    private fun prewarmTts(language: SupportedLanguage) {
+        if (ttsPlaybackJob?.isActive == true || audioBeaconJob?.isActive == true) return
+        ttsPrewarmJob?.cancel()
+        ttsPrewarmJob = viewModelScope.launch(Dispatchers.Default) {
+            delay(1500)
+            if (!modelStorageManager.isInstalledOnDisk(language.code)) {
+                Log.d("MissionControl", "prewarmTts: no neural pack on disk for '${language.code}' — skipping")
+                return@launch
+            }
+            val onnx = onnxInferenceManager ?: return@launch
+            // Same tag pair recreateAudioWithTts resolves, so its loadTts call hits the cache.
+            val loaded = runCatching { onnx.loadTts(language.code) || onnx.loadTts(language.languageTag) }
+                .getOrDefault(false)
+            Log.d("MissionControl", "prewarmTts: '${language.code}' loaded=$loaded")
+        }
+    }
+
+    private var systemTtsVisualizerJob: Job? = null
 
     private fun speakWithSystemTts(text: String, langCode: String) {
         val tts = systemTts ?: run {
@@ -1919,16 +2202,31 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     _uiState.update { it.copy(channelState = RadioChannelState.RECEIVING) }
-                    // The platform TTS engine exposes no PCM, so the meter shows
-                    // a flat "speaking" level rather than an invented waveform.
-                    _audioLevel.value = SYSTEM_TTS_ACTIVE_LEVEL
-                    logVoice("tts", "system TTS started")
+                    // Utterance audio is actually on the speaker now: hold the
+                    // guard until onDone/onError (bounded by the 60s cap).
+                    extendEchoGuard(ttsMaxGuardMs)
+                    // Start smooth visualizer animation loop
+                    systemTtsVisualizerJob?.cancel()
+                    systemTtsVisualizerJob = viewModelScope.launch {
+                        var tick = 0f
+                        while (true) {
+                            tick += 0.35f
+                            _audioLevel.value = 0.3f + 0.6f * kotlin.math.sin(tick.toDouble()).toFloat().coerceIn(0f, 1f)
+                            delay(80)
+                        }
+                    }
                 }
                 override fun onDone(utteranceId: String?) {
+                    allowBargeIn = false
+                    endEchoGuard() // known completion: keep only the decay window
+                    systemTtsVisualizerJob?.cancel()
                     _audioLevel.value = 0f
                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                 }
                 override fun onError(utteranceId: String?) {
+                    allowBargeIn = false
+                    endEchoGuard() // known completion: keep only the decay window
+                    systemTtsVisualizerJob?.cancel()
                     _audioLevel.value = 0f
                     _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
                     Log.w(voicePipelineTag, "[tts] system TTS error")
@@ -1938,9 +2236,18 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
                 putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
             }
+            // Echo guard: cover the engine start-up window (queued utterance ->
+            // audible audio); onStart/onDone/onError then drive it precisely.
+            extendEchoGuard(ttsStartWindowMs)
+            // Barge-in eligible: near-mic speech may abort this utterance
+            // (stop() below triggers onDone/onError, which reset this).
+            allowBargeIn = true
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "itantra_${System.currentTimeMillis()}")
         } catch (e: Exception) {
-            Log.e(voicePipelineTag, "[tts] error in speakWithSystemTts", e)
+            Log.e("MissionControl", "Error in speakWithSystemTts", e)
+            allowBargeIn = false
+            endEchoGuard() // speak() may never have started — release the window
+            systemTtsVisualizerJob?.cancel()
             _audioLevel.value = 0f
         }
     }
@@ -1980,6 +2287,10 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private fun startAudioBeacon(language: SupportedLanguage) {
         audioBeaconJob?.cancel()
         audioBeaconJob = viewModelScope.launch {
+            // The beacon announcement AND siren loop are never barge-in
+            // eligible — the siren must not be interruptible by near-mic
+            // speech (a barged siren would loop between phones).
+            allowBargeIn = false
             val playback = audioPlaybackEngine
             if (playback == null) {
                 // No audio output — the beacon is silent but the radio still runs.
@@ -2005,10 +2316,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     }
                 }
                 if (pcm != null && pcm.isNotEmpty()) {
+                    // Echo guard: cover the announcement phrase itself.
+                    val phraseMs = pcm.size * 1000L / OnnxInferenceManager.TTS_SAMPLE_RATE_HZ
+                    extendEchoGuard(phraseMs)
                     playback.play(shortsToPcmLittleEndian(pcm), OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
                     // Wait out the phrase before the siren loop (best-effort
                     // pacing; AudioTrack buffers asynchronously).
-                    val phraseMs = pcm.size * 1000L / OnnxInferenceManager.TTS_SAMPLE_RATE_HZ
                     delay(phraseMs + 300L)
                 }
             }
@@ -2020,6 +2333,10 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     delay(400)
                     continue
                 }
+                // Echo guard: each siren iteration extends the window, so the
+                // mic stays half-duplex for the whole SOS siren (a captured
+                // siren would otherwise loop between phones).
+                extendEchoGuard(sirenToneGuardMs)
                 playback.playTone(880f, 320, 0.9f)
                 delay(400)
                 if (_connectedRescuer.value != null || _connectedVictimIntercom.value != null) {
@@ -2027,6 +2344,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     delay(400)
                     continue
                 }
+                extendEchoGuard(sirenToneGuardMs)
                 playback.playTone(620f, 320, 0.9f)
                 delay(400)
                 delay(600)
@@ -2037,6 +2355,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private fun stopAudioBeacon() {
         audioBeaconJob?.cancel()
         audioBeaconJob = null
+        allowBargeIn = false // beacon clips were never interruptible — force-clear
+        // Known-completion end: release the siren guard down to the decay window.
+        endEchoGuard()
         if (!_isWalkieActive.value && !_isBroadcastingToAll.value && _connectedVictimIntercom.value == null) {
             audioPlaybackEngine?.stop()
         }
@@ -2144,9 +2465,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         if (modelStorageManager.isInstalled(language.code)) {
             _modelWarningMessage.value = null
         }
-        // The language is part of the beacon payload, so re-advertise whatever
-        // mode currently owns the radio.
-        syncBeaconAdvertising()
+        // Natural idle point: re-warm TTS for the newly selected language.
+        prewarmTts(language)
+        if (_isRescueActive.value) {
+            startRescuerBeaconAdvertising()
+        }
+        if (_isSosBroadcasting.value) {
+            startBeaconAdvertising(buildDistressBeaconPayload())
+        }
     }
 
     fun setThemeMode(mode: String) {
@@ -2323,7 +2649,21 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     null
                 }
             } ?: return@launch
-            audioPlaybackEngine?.play(shortsToPcmLittleEndian(pcm), OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
+            // Echo guard: log playback through the loudspeaker is still self-audio.
+            extendEchoGuard(pcm.size * 1000L / OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
+            // Barge-in eligible: near-mic speech may abort this clip.
+            allowBargeIn = true
+            try {
+                audioPlaybackEngine?.play(shortsToPcmLittleEndian(pcm), OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
+            } finally {
+                allowBargeIn = false
+                // Cancellation-safe UI reset: also runs when handleBargeIn
+                // aborts this clip mid-playback.
+                withContext(Dispatchers.Main + NonCancellable) {
+                    _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
+                    _audioLevel.value = 0f
+                }
+            }
         }
     }
 
@@ -2358,7 +2698,21 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     null
                 }
             } ?: return@launch
-            audioPlaybackEngine?.play(shortsToPcmLittleEndian(pcm), OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
+            // Echo guard: settings test tone would otherwise loop into STT.
+            extendEchoGuard(pcm.size * 1000L / OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
+            // Barge-in eligible: near-mic speech may abort this clip.
+            allowBargeIn = true
+            try {
+                audioPlaybackEngine?.play(shortsToPcmLittleEndian(pcm), OnnxInferenceManager.TTS_SAMPLE_RATE_HZ)
+            } finally {
+                allowBargeIn = false
+                // Cancellation-safe UI reset: also runs when handleBargeIn
+                // aborts this clip mid-playback.
+                withContext(Dispatchers.Main + NonCancellable) {
+                    _uiState.update { it.copy(channelState = RadioChannelState.STANDBY) }
+                    _audioLevel.value = 0f
+                }
+            }
         }
     }
 
@@ -2480,6 +2834,10 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             // on disk (the disk scan is the source of truth).
             modelStorageManager.rescan()
             settingsRepository.setInstalledLanguageTags(modelStorageManager.installedTags())
+
+            // The disk scan is now authoritative: warm the selected language's
+            // TTS sessions so the first incoming mesh message replays instantly.
+            prewarmTts(_uiState.value.selectedLanguage)
 
             // Refresh the catalogue from the network when available; the
             // built-in fallback keeps everything working fully offline.

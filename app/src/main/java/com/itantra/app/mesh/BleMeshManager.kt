@@ -268,6 +268,80 @@ class BleMeshManager(context: Context) {
     private val connectedGattClients = ConcurrentHashMap.newKeySet<BluetoothDevice>()
     private val discoveredDevices = ConcurrentHashMap<Long, BluetoothDevice>()
     private val activeGattClients = ConcurrentHashMap<String, BluetoothGatt>()
+    private val negotiatedMtus = ConcurrentHashMap<String, Int>()
+    private val chunkAssemblers = ConcurrentHashMap<String, BleChunkAssembler>()
+    private var nextBleTransferId = 0
+
+    private class BleChunkAssembler(val totalChunks: Int) {
+        val createdEpochMs = System.currentTimeMillis()
+        val chunks = arrayOfNulls<ByteArray>(totalChunks)
+        var receivedCount = 0
+
+        @Synchronized
+        fun addChunk(index: Int, data: ByteArray): ByteArray? {
+            if (index in 0 until totalChunks && chunks[index] == null) {
+                chunks[index] = data
+                receivedCount++
+                if (receivedCount == totalChunks) {
+                    val totalBytes = chunks.filterNotNull().sumOf { it.size }
+                    val out = ByteArray(totalBytes)
+                    var offset = 0
+                    for (chunk in chunks) {
+                        if (chunk != null) {
+                            System.arraycopy(chunk, 0, out, offset, chunk.size)
+                            offset += chunk.size
+                        }
+                    }
+                    return out
+                }
+            }
+            return null
+        }
+    }
+
+    private fun handleReceivedBleBytes(fromAddress: String, bytes: ByteArray) {
+        if (bytes.size >= 5 && bytes[0] == 0x49.toByte() && bytes[1] == 0x43.toByte()) {
+            val transferId = bytes[2].toInt() and 0xFF
+            val chunkIdx = bytes[3].toInt() and 0xFF
+            val totalChunks = bytes[4].toInt() and 0xFF
+            val chunkData = bytes.copyOfRange(5, bytes.size)
+
+            val now = System.currentTimeMillis()
+            chunkAssemblers.entries.removeIf { (now - it.value.createdEpochMs) > 8000L }
+
+            val key = "$fromAddress-$transferId"
+            val assembler = chunkAssemblers.getOrPut(key) { BleChunkAssembler(totalChunks) }
+            val fullPacket = assembler.addChunk(chunkIdx, chunkData)
+            if (fullPacket != null) {
+                chunkAssemblers.remove(key)
+                Log.i("BleMeshManager", "Reassembled BLE packet: ${fullPacket.size} bytes from $fromAddress")
+                _incomingPackets.tryEmit(fullPacket)
+            }
+        } else {
+            _incomingPackets.tryEmit(bytes)
+        }
+    }
+
+    private fun chunkPacket(bytes: ByteArray, maxChunkSize: Int): List<ByteArray> {
+        val transferId = synchronized(this) { (nextBleTransferId++ and 0xFF) }
+        val chunkDataSize = maxChunkSize.coerceAtLeast(15)
+        val totalChunks = (bytes.size + chunkDataSize - 1) / chunkDataSize
+        val chunks = ArrayList<ByteArray>(totalChunks)
+        for (i in 0 until totalChunks) {
+            val start = i * chunkDataSize
+            val end = minOf(start + chunkDataSize, bytes.size)
+            val len = end - start
+            val chunk = ByteArray(5 + len)
+            chunk[0] = 0x49.toByte() // 'I'
+            chunk[1] = 0x43.toByte() // 'C'
+            chunk[2] = transferId.toByte()
+            chunk[3] = i.toByte()
+            chunk[4] = totalChunks.toByte()
+            System.arraycopy(bytes, start, chunk, 5, len)
+            chunks.add(chunk)
+        }
+        return chunks
+    }
 
     /** Reverse lookup so a GATT link (keyed by MAC) can be mapped back to a mesh node id. */
     private val nodeIdByAddress = ConcurrentHashMap<String, Long>()
@@ -360,7 +434,7 @@ class BleMeshManager(context: Context) {
                     } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                         connectedGattClients.remove(device)
                         preparedBuffers.remove(device.address)
-                        markUnlinked(device)
+                        negotiatedMtus.remove(device.address)
                         Log.i("BleMeshManager", "GATT client disconnected from our server: ${device.address}")
                     }
                 }
@@ -387,7 +461,7 @@ class BleMeshManager(context: Context) {
                             stream.write(value)
                         } else {
                             Log.i("BleMeshManager", "Received GATT write packet: ${value.size} bytes from ${device.address}")
-                            _incomingPackets.tryEmit(value)
+                            handleReceivedBleBytes(device.address, value)
                         }
                     }
                 }
@@ -403,7 +477,7 @@ class BleMeshManager(context: Context) {
                         val fullBytes = stream.toByteArray()
                         if (fullBytes.isNotEmpty()) {
                             Log.i("BleMeshManager", "Received prepared GATT packet: ${fullBytes.size} bytes from ${device.address}")
-                            _incomingPackets.tryEmit(fullBytes)
+                            handleReceivedBleBytes(device.address, fullBytes)
                         }
                     }
                 }
@@ -429,6 +503,7 @@ class BleMeshManager(context: Context) {
 
                 override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
                     Log.i("BleMeshManager", "GATT client MTU negotiated: $mtu for ${device.address}")
+                    negotiatedMtus[device.address] = mtu
                 }
             }) ?: return
 
@@ -471,11 +546,8 @@ class BleMeshManager(context: Context) {
         }
         activeGattClients.clear()
         connectingDevices.clear()
-        // No mode needs BLE any more: drop discovery caches so stale peers are
-        // never used as GATT write targets.
-        discoveredDevices.clear()
-        nodeIdByAddress.clear()
-        refreshLinkedNodes()
+        negotiatedMtus.clear()
+        chunkAssemblers.clear()
     }
 
     private fun checkStopGattServer() {
@@ -500,19 +572,21 @@ class BleMeshManager(context: Context) {
                         if (newState == BluetoothProfile.STATE_CONNECTED) {
                             Log.i("BleMeshManager", "Connected to peer GATT: ${device.address}")
                             activeGattClients[device.address] = gatt
-                            markLinked(device)
-                            gatt.requestMtu(512)
-                            gatt.discoverServices()
+                            val requested = gatt.requestMtu(512)
+                            if (!requested) {
+                                gatt.discoverServices()
+                            }
                         } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                             Log.i("BleMeshManager", "Disconnected from peer GATT: ${device.address}")
                             activeGattClients.remove(device.address)
-                            markUnlinked(device)
+                            negotiatedMtus.remove(device.address)
                             runCatching { gatt.close() }
                         }
                     }
 
                     override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
                         Log.d("BleMeshManager", "GATT MTU negotiated with ${device.address}: $mtu")
+                        negotiatedMtus[device.address] = mtu
                         gatt.discoverServices()
                     }
 
@@ -538,6 +612,10 @@ class BleMeshManager(context: Context) {
                         }
                     }
 
+                    override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                        Log.i("BleMeshManager", "CCCD descriptor write completed for ${device.address}, status=$status")
+                    }
+
                     override fun onCharacteristicChanged(
                         gatt: BluetoothGatt,
                         characteristic: BluetoothGattCharacteristic,
@@ -545,7 +623,7 @@ class BleMeshManager(context: Context) {
                     ) {
                         if (value.isNotEmpty()) {
                             Log.i("BleMeshManager", "Received GATT notification packet (Tiramisu): ${value.size} bytes from ${device.address}")
-                            _incomingPackets.tryEmit(value)
+                            handleReceivedBleBytes(device.address, value)
                         }
                     }
 
@@ -557,7 +635,7 @@ class BleMeshManager(context: Context) {
                         val value = characteristic.value
                         if (value != null && value.isNotEmpty()) {
                             Log.i("BleMeshManager", "Received GATT notification packet (Legacy): ${value.size} bytes from ${device.address}")
-                            _incomingPackets.tryEmit(value)
+                            handleReceivedBleBytes(device.address, value)
                         }
                     }
                 })
@@ -592,16 +670,21 @@ class BleMeshManager(context: Context) {
         if (server != null && char != null) {
             for (client in connectedGattClients) {
                 try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        server.notifyCharacteristicChanged(client, char, false, bytes)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        char.value = bytes
-                        @Suppress("DEPRECATION")
-                        server.notifyCharacteristicChanged(client, char, false)
+                    val mtu = negotiatedMtus[client.address] ?: 23
+                    val maxChunkSize = maxOf(15, mtu - 8)
+                    val chunks = chunkPacket(bytes, maxChunkSize)
+                    for (chunk in chunks) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            server.notifyCharacteristicChanged(client, char, false, chunk)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            char.value = chunk
+                            @Suppress("DEPRECATION")
+                            server.notifyCharacteristicChanged(client, char, false)
+                        }
+                        if (chunks.size > 1) Thread.sleep(12)
                     }
-                    targets++
-                    Log.d("BleMeshManager", "Notified GATT client ${client.address} with ${bytes.size} bytes")
+                    Log.d("BleMeshManager", "Notified GATT client ${client.address} with ${chunks.size} chunks (${bytes.size} bytes total)")
                 } catch (e: Exception) {
                     Log.w("BleMeshManager", "Failed to notify GATT client ${client.address}", e)
                 }
@@ -627,87 +710,32 @@ class BleMeshManager(context: Context) {
     private fun sendPacketToDevice(device: BluetoothDevice, bytes: ByteArray) {
         scope.launch(Dispatchers.IO) {
             try {
-                val existingGatt = activeGattClients[device.address]
-                if (existingGatt != null) {
-                    val service = existingGatt.getService(SERVICE_UUID)
+                var gatt = activeGattClients[device.address]
+                if (gatt == null) {
+                    connectPeerGatt(device)
+                    var waitAttempts = 0
+                    while (waitAttempts < 10 && activeGattClients[device.address] == null) {
+                        delay(60)
+                        waitAttempts++
+                    }
+                    gatt = activeGattClients[device.address]
+                }
+                if (gatt != null) {
+                    val service = gatt.getService(SERVICE_UUID)
                     val characteristic = service?.getCharacteristic(CHAR_DATA_UUID)
                     if (characteristic != null) {
-                        val ok = writeCharacteristicData(existingGatt, characteristic, bytes)
-                        Log.d("BleMeshManager", "Direct GATT write to ${device.address}: success=$ok")
-                        if (ok) return@launch
+                        val mtu = negotiatedMtus[device.address] ?: 23
+                        val maxChunkSize = maxOf(15, mtu - 8)
+                        val chunks = chunkPacket(bytes, maxChunkSize)
+                        for (chunk in chunks) {
+                            writeCharacteristicData(gatt, characteristic, chunk)
+                            if (chunks.size > 1) delay(12)
+                        }
+                        Log.d("BleMeshManager", "Direct GATT write ${chunks.size} chunks to ${device.address}")
                     }
                 }
-
-                // If not already connected or direct write missed, connect GATT and send upon service discovery
-                device.connectGatt(appContext, false, object : BluetoothGattCallback() {
-                    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                        if (newState == BluetoothProfile.STATE_CONNECTED) {
-                            Log.i("BleMeshManager", "Connected to peer GATT: ${device.address}")
-                            activeGattClients[device.address] = gatt
-                            markLinked(device)
-                            gatt.requestMtu(512)
-                            gatt.discoverServices()
-                        } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                            Log.i("BleMeshManager", "Disconnected from peer GATT: ${device.address}")
-                            activeGattClients.remove(device.address)
-                            markUnlinked(device)
-                            runCatching { gatt.close() }
-                        }
-                    }
-
-                    override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-                        Log.d("BleMeshManager", "GATT MTU negotiated with ${device.address}: $mtu")
-                        gatt.discoverServices()
-                    }
-
-                    override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                        if (status == BluetoothGatt.GATT_SUCCESS) {
-                            val service = gatt.getService(SERVICE_UUID)
-                            val characteristic = service?.getCharacteristic(CHAR_DATA_UUID)
-                            if (characteristic != null) {
-                                gatt.setCharacteristicNotification(characteristic, true)
-                                val cccd = characteristic.getDescriptor(CCCD_UUID)
-                                if (cccd != null) {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                        gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                                    } else {
-                                        @Suppress("DEPRECATION")
-                                        cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                                        @Suppress("DEPRECATION")
-                                        gatt.writeDescriptor(cccd)
-                                    }
-                                }
-                                val ok = writeCharacteristicData(gatt, characteristic, bytes)
-                                Log.i("BleMeshManager", "GATT write on service discovered to ${device.address}: success=$ok")
-                            }
-                        }
-                    }
-
-                    override fun onCharacteristicChanged(
-                        gatt: BluetoothGatt,
-                        characteristic: BluetoothGattCharacteristic,
-                        value: ByteArray
-                    ) {
-                        if (value.isNotEmpty()) {
-                            Log.i("BleMeshManager", "Received GATT notification packet (Tiramisu): ${value.size} bytes from ${device.address}")
-                            _incomingPackets.tryEmit(value)
-                        }
-                    }
-
-                    @Suppress("DEPRECATION")
-                    override fun onCharacteristicChanged(
-                        gatt: BluetoothGatt,
-                        characteristic: BluetoothGattCharacteristic
-                    ) {
-                        val value = characteristic.value
-                        if (value != null && value.isNotEmpty()) {
-                            Log.i("BleMeshManager", "Received GATT notification packet (Legacy): ${value.size} bytes from ${device.address}")
-                            _incomingPackets.tryEmit(value)
-                        }
-                    }
-                })
             } catch (e: Exception) {
-                Log.w("BleMeshManager", "Error connecting/writing to peer GATT ${device.address}", e)
+                Log.w("BleMeshManager", "Error sending packet to ${device.address}", e)
             }
         }
     }

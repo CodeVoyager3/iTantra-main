@@ -103,6 +103,34 @@ class WifiDirectMeshManager(context: Context) {
     private var socket: DatagramSocket? = null
     private var udpThread: Thread? = null
 
+    private val peerIpCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun registerPeerIp(ip: String) {
+        val clean = ip.trim()
+        if (clean.isNotEmpty() && clean != "127.0.0.1" && clean != _localIpAddress.value) {
+            peerIpCache[clean] = System.currentTimeMillis()
+            Log.i("WifiDirectMeshManager", "Registered peer IP: $clean")
+        }
+    }
+
+    fun getKnownPeerIps(): Set<String> = peerIpCache.keys.toSet()
+
+    private fun isLocalAddress(addr: InetAddress): Boolean {
+        if (addr.isLoopbackAddress) return true
+        return try {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return false
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                for (ia in iface.inetAddresses) {
+                    if (ia == addr) return true
+                }
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     // =========================================================================
     // Permissions
     // =========================================================================
@@ -170,7 +198,14 @@ class WifiDirectMeshManager(context: Context) {
         val info: WifiP2pInfo? = intent.getParcelableExtraCompat(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
         info?.let {
             _isGroupOwner.value = it.isGroupOwner
-            if (it.groupFormed) _localIpAddress.value = resolveLocalIp()
+            if (it.groupFormed) {
+                _localIpAddress.value = resolveLocalIp()
+                val goHost = it.groupOwnerAddress?.hostAddress
+                if (goHost != null && !it.isGroupOwner) {
+                    registerPeerIp(goHost)
+                    Log.i("WifiDirectMeshManager", "Added Wi-Fi Direct Group Owner IP: $goHost")
+                }
+            }
         }
         if (info?.groupFormed == false) {
             _isGroupOwner.value = false
@@ -372,6 +407,10 @@ class WifiDirectMeshManager(context: Context) {
                 val packet = DatagramPacket(buffer, buffer.size)
                 s.receive(packet)
                 if (packet.length > 0) {
+                    val senderIp = packet.address?.hostAddress
+                    if (senderIp != null && !isLocalAddress(packet.address)) {
+                        registerPeerIp(senderIp)
+                    }
                     Log.i("WifiDirectMeshManager", "UDP rx: received ${packet.length} bytes from ${packet.address}:${packet.port}")
                     _incomingDatagrams.tryEmit(
                         MeshDatagram(
@@ -409,14 +448,29 @@ class WifiDirectMeshManager(context: Context) {
         return list.distinct()
     }
 
-    /** Broadcasts [bytes] to the ad-hoc LAN / Wi-Fi network. */
+    /** Broadcasts [bytes] to the ad-hoc LAN / Wi-Fi network and direct unicast to known peer IPs. */
     fun broadcastDatagram(bytes: ByteArray): Boolean {
         if (socket == null) {
             startUdpBroadcast()
         }
         val s = socket ?: return false
-        val addresses = getBroadcastAddresses()
         var sent = false
+
+        // 1. Direct unicast to learned peer IPs (bypasses router AP isolation & broadcast suppression)
+        val now = System.currentTimeMillis()
+        peerIpCache.entries.removeIf { (now - it.value) > 300_000L }
+        for (peerIp in peerIpCache.keys) {
+            try {
+                s.send(DatagramPacket(bytes, bytes.size, InetAddress.getByName(peerIp), UDP_PORT))
+                sent = true
+                Log.d("WifiDirectMeshManager", "broadcastDatagram direct unicast to $peerIp:$UDP_PORT")
+            } catch (e: Exception) {
+                Log.w("WifiDirectMeshManager", "broadcastDatagram unicast to $peerIp failed: ${e.message}")
+            }
+        }
+
+        // 2. Subnet broadcast and generic 255.255.255.255
+        val addresses = getBroadcastAddresses()
         for (addr in addresses) {
             try {
                 s.send(DatagramPacket(bytes, bytes.size, addr, UDP_PORT))

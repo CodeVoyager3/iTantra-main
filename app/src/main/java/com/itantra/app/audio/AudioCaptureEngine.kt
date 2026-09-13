@@ -53,6 +53,17 @@ class AudioCaptureEngine(context: Context) {
 
         /** Maximum ceiling for the adaptive noise floor so fan noise cannot drown out speech. */
         private const val MAX_NOISE_FLOOR = 2000.0
+
+        /**
+         * Extra dB margin above [SPEECH_TRIGGER_DB] for acoustic barge-in:
+         * suspected near-mic speech interrupting self-playback; false
+         * positives are tolerated — the ViewModel confirms speech persists
+         * after playback stops.
+         */
+        private const val BARGE_IN_EXTRA_DB = 4.0
+
+        /** Sustained excess duration (ms) before [onBargeInDetected] fires during a guard episode. */
+        private const val BARGE_IN_SUSTAIN_MS = 400L
     }
 
     private val appContext = context.applicationContext
@@ -75,6 +86,30 @@ class AudioCaptureEngine(context: Context) {
     var onLevelChanged: ((Float) -> Unit)? = null
     var onSpeechProbability: ((Float) -> Unit)? = null
     var onEndOfTurn: (() -> Unit)? = null
+
+    /**
+     * Acoustic barge-in: fired at most once per echo-guard episode when
+     * sustained near-mic loudness suggests someone is talking over this
+     * device's own playback. Detector state resets when the guard releases
+     * or re-activates.
+     */
+    var onBargeInDetected: (() -> Unit)? = null
+
+    /**
+     * Acoustic echo-loop guard, pulled once per capture frame by the capture
+     * thread. While it returns true this engine runs half-duplex: [onFrame]
+     * is not emitted and no speech turn may start or complete, because the mic
+     * is hearing this device's own loudspeaker (TTS / siren / intercom
+     * playback) and re-transmitting that audio would create an echo loop
+     * between mesh phones. [onLevelChanged] / [onSpeechProbability] keep
+     * flowing so meters stay live. On the active->inactive transition all VAD
+     * turn state is reset (speaking=false, counters cleared, pre-speech buffer
+     * dropped, no [onEndOfTurn]) so the tail of the playback can never finish
+     * a stale turn. The platform AEC stays enabled as a secondary layer but
+     * cannot cancel media-route (USAGE_MEDIA + MODE_NORMAL) playback.
+     */
+    @Volatile
+    var echoGuardCheck: (() -> Boolean)? = null
 
     private var record: AudioRecord? = null
 
@@ -209,6 +244,9 @@ class AudioCaptureEngine(context: Context) {
         var noiseFloor = -1.0 // initialized from the first frame
         var consecutiveSpeechFrames = 0
         var silentFrames = 0
+        var echoGuardWasActive = false
+        var bargeInExcessFrames = 0
+        var bargeInFired = false
 
         while (running) {
             val read = try {
@@ -234,49 +272,95 @@ class AudioCaptureEngine(context: Context) {
 
             val marginDb = 20.0 * log10((rms / noiseFloor).coerceAtLeast(1e-6))
 
-            if (speaking) {
-                if (marginDb >= SPEECH_RELEASE_DB) {
-                    silentFrames = 0
-                } else {
-                    silentFrames++
+            // Echo guard (pulled, no timers): while self-playback is audible
+            // the mic only hears our own loudspeaker — hold the VAD entirely
+            // and discard pre-speech audio so it can never re-enter the mesh.
+            // Noise-floor adaptation is also frozen: guard audio is playback
+            // contamination, not ambient noise.
+            val echoGuardActive = echoGuardCheck?.invoke() == true
+            if (echoGuardActive) {
+                if (!echoGuardWasActive) {
+                    // Fresh guard episode: barge-in detector starts clean.
+                    bargeInExcessFrames = 0
+                    bargeInFired = false
                 }
-                if (silentFrames * FRAME_MS >= END_OF_TURN_MS) {
-                    speaking = false
-                    _speechActive.value = false
-                    preSpeechBuffer.clear()
-                    onSpeechStateChanged?.invoke(false)
-                    onEndOfTurn?.invoke()
-                    silentFrames = 0
+                consecutiveSpeechFrames = 0
+                preSpeechBuffer.clear()
+                echoGuardWasActive = true
+
+                // Acoustic barge-in: while self-playback is held, a frame
+                // clearly above the speech-trigger level is suspected
+                // near-mic speech interrupting it. Sustained excess fires
+                // once per episode so the caller can abort the clip.
+                if (marginDb >= SPEECH_TRIGGER_DB + BARGE_IN_EXTRA_DB) {
+                    bargeInExcessFrames++
+                } else {
+                    bargeInExcessFrames = 0
+                }
+                if (!bargeInFired && bargeInExcessFrames * FRAME_MS >= BARGE_IN_SUSTAIN_MS) {
+                    bargeInFired = true
+                    onBargeInDetected?.invoke()
                 }
             } else {
-                if (marginDb >= SPEECH_TRIGGER_DB) {
-                    consecutiveSpeechFrames++
-                } else {
-                    consecutiveSpeechFrames = 0
-                }
-                if (consecutiveSpeechFrames >= SPEECH_TRIGGER_FRAMES) {
-                    speaking = true
-                    _speechActive.value = true
-                    onSpeechStateChanged?.invoke(true)
+                if (echoGuardWasActive) {
+                    // Playback just ended: reset turn state so the guard tail
+                    // can never complete a stale speech turn (no onEndOfTurn).
+                    echoGuardWasActive = false
+                    bargeInExcessFrames = 0
+                    bargeInFired = false
+                    if (speaking) {
+                        speaking = false
+                        _speechActive.value = false
+                        onSpeechStateChanged?.invoke(false)
+                    }
                     silentFrames = 0
-                    // Flush buffered pre-speech frames into turn buffer so initial consonants are intact
-                    if (!muted) {
-                        while (preSpeechBuffer.isNotEmpty()) {
-                            onFrame?.invoke(preSpeechBuffer.removeFirst())
+                    consecutiveSpeechFrames = 0
+                    preSpeechBuffer.clear()
+                }
+                if (speaking) {
+                    if (marginDb >= SPEECH_RELEASE_DB) {
+                        silentFrames = 0
+                    } else {
+                        silentFrames++
+                    }
+                    if (silentFrames * FRAME_MS >= END_OF_TURN_MS) {
+                        speaking = false
+                        _speechActive.value = false
+                        preSpeechBuffer.clear()
+                        onSpeechStateChanged?.invoke(false)
+                        onEndOfTurn?.invoke()
+                        silentFrames = 0
+                    }
+                } else {
+                    if (marginDb >= SPEECH_TRIGGER_DB) {
+                        consecutiveSpeechFrames++
+                    } else {
+                        consecutiveSpeechFrames = 0
+                    }
+                    if (consecutiveSpeechFrames >= SPEECH_TRIGGER_FRAMES) {
+                        speaking = true
+                        _speechActive.value = true
+                        onSpeechStateChanged?.invoke(true)
+                        silentFrames = 0
+                        // Flush buffered pre-speech frames into turn buffer so initial consonants are intact
+                        if (!muted) {
+                            while (preSpeechBuffer.isNotEmpty()) {
+                                onFrame?.invoke(preSpeechBuffer.removeFirst())
+                            }
+                        } else {
+                            preSpeechBuffer.clear()
                         }
                     } else {
-                        preSpeechBuffer.clear()
+                        // Buffer pre-speech frames while quiet
+                        if (preSpeechBuffer.size >= PRE_SPEECH_FRAMES) {
+                            preSpeechBuffer.removeFirst()
+                        }
+                        preSpeechBuffer.addLast(pcmFrame)
                     }
-                } else {
-                    // Buffer pre-speech frames while quiet
-                    if (preSpeechBuffer.size >= PRE_SPEECH_FRAMES) {
-                        preSpeechBuffer.removeFirst()
+                    // Adapt the noise floor slowly during silence
+                    if (rms <= noiseFloor * 1.4) {
+                        noiseFloor = (noiseFloor * 0.96 + rms * 0.04).coerceIn(MIN_NOISE_FLOOR, MAX_NOISE_FLOOR)
                     }
-                    preSpeechBuffer.addLast(pcmFrame)
-                }
-                // Adapt the noise floor slowly during silence
-                if (rms <= noiseFloor * 1.4) {
-                    noiseFloor = (noiseFloor * 0.96 + rms * 0.04).coerceIn(MIN_NOISE_FLOOR, MAX_NOISE_FLOOR)
                 }
             }
 
@@ -291,7 +375,7 @@ class AudioCaptureEngine(context: Context) {
                 (SPEECH_TRIGGER_DB - SPEECH_RELEASE_DB)).toFloat().coerceIn(0f, 1f)
             onSpeechProbability?.invoke(prob01)
 
-            if (!muted && speaking) {
+            if (!echoGuardActive && !muted && speaking) {
                 onFrame?.invoke(pcmFrame)
             }
         }

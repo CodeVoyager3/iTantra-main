@@ -79,7 +79,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.itantra.app.model.PeerDevice
-import com.itantra.app.model.TransportProtocol
+import com.itantra.app.model.RadioChannelState
 import com.itantra.app.ui.theme.AccentBlue
 import com.itantra.app.ui.theme.AccentBlueContainer
 import com.itantra.app.ui.theme.BadgeMintContainer
@@ -123,20 +123,8 @@ fun WalkieScreen(
     val discoveredDevices by viewModel.discoveredWalkieDevices.collectAsState()
     val isVadSpeaking by viewModel.isVadSpeaking.collectAsState()
     val audioLevel by viewModel.audioLevel.collectAsState()
-    val isWalkieLinkActive by viewModel.isWalkieLinkActive.collectAsState()
-    val isReceivingAudio by viewModel.isReceivingAudio.collectAsState()
-    val remoteAudioLevel by viewModel.remoteAudioLevel.collectAsState()
-
-    // Real audio levels only: local mic while transmitting, received frame
-    // RMS while a peer is talking. Nothing is synthesised for display.
-    val liveAudioLevel = if (isReceivingAudio) {
-        remoteAudioLevel
-    } else if (isTransmitting || isVadSpeaking) {
-        audioLevel
-    } else {
-        0f
-    }
-    val connectedPairedCount = pairedDevices.count { it.isConnected }
+    val uiState by viewModel.uiState.collectAsState()
+    val messageLogs by viewModel.messageLogs.collectAsState()
 
     val scrollState = rememberScrollState()
 
@@ -769,6 +757,150 @@ fun WalkieScreen(
                                 fontWeight = FontWeight.Bold,
                                 color = colors.error
                             )
+                        }
+                    }
+                }
+            }
+
+            // =======================================================
+            // LIVE TRANSCRIPTION & VOICE COMMS CARD
+            // =======================================================
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .shadow(elevation = 2.dp, shape = RoundedCornerShape(22.dp), spotColor = Color(0x0A000000))
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(colors.surface)
+                    .border(1.dp, colors.outline, RoundedCornerShape(22.dp))
+                    .padding(16.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "LIVE TRANSCRIPTION",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.8.sp,
+                                color = colors.textSecondary
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(BadgeMintContainer)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (uiState.channelState == RadioChannelState.RECEIVING) "⚡ RECEIVING VOICE"
+                                           else if (isTransmitting || isVadSpeaking) "🎙️ TRANSMITTING"
+                                           else "● STANDBY",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (uiState.channelState == RadioChannelState.RECEIVING) MeshGreenText
+                                           else if (isTransmitting || isVadSpeaking) AccentBlue
+                                           else colors.textSecondary
+                                )
+                            }
+                        }
+
+                        if (messageLogs.isNotEmpty()) {
+                            Text(
+                                text = "${messageLogs.size} logs",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.textSecondary
+                            )
+                        }
+                    }
+
+                    // Current Live Transcript Bar
+                    val transcript = uiState.currentTranscript
+                    if (transcript.isNotBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    if (uiState.channelState == RadioChannelState.RECEIVING) MeshGreenContainer.copy(alpha = 0.5f)
+                                    else colors.cardSecondaryBg
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = if (uiState.channelState == RadioChannelState.RECEIVING) MeshGreen.copy(alpha = 0.5f)
+                                           else colors.outline,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .padding(12.dp)
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = if (uiState.channelState == RadioChannelState.RECEIVING) "Incoming Speech:" else "Live Caption:",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (uiState.channelState == RadioChannelState.RECEIVING) MeshGreenText else colors.textSecondary
+                                )
+                                Text(
+                                    text = transcript,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = colors.textPrimary
+                                )
+                            }
+                        }
+                    } else if (messageLogs.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(colors.cardSecondaryBg)
+                                .padding(12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Speak or hold PTT to transmit. Transcriptions sync across all radios automatically.",
+                                fontSize = 11.sp,
+                                color = colors.textSecondary,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+
+                    // Recent Message Log (Last 3 messages)
+                    if (messageLogs.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            messageLogs.take(3).forEach { msg ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (msg.isLocal) AccentBlueContainer.copy(alpha = 0.35f) else MeshGreenContainer.copy(alpha = 0.35f))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = if (msg.isLocal) "You (${msg.senderCallsign})" else msg.senderCallsign,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (msg.isLocal) AccentBlue else MeshGreenText
+                                        )
+                                        Text(
+                                            text = msg.text,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Normal,
+                                            color = colors.textPrimary
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }

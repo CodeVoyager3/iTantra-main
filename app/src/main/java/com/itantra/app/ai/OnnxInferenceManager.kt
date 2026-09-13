@@ -183,11 +183,22 @@ class OnnxInferenceManager(context: Context) {
             return true
         }
         closeTtsLocked()
-        val env = ensureEnvironment() ?: return false
-        val ttsDir = resolveModelSubdir(languageTag, "tts") ?: return false
-        val fastPitchFile = resolveModelFile(ttsDir, preferred = FASTPITCH_FILE) ?: return false
-        val hifiGanFile = resolveModelFile(ttsDir, preferred = HIFIGAN_FILE, exclude = fastPitchFile)
-            ?: return false
+        val env = ensureEnvironment() ?: run {
+            Log.w("OnnxInferenceManager", "loadTts: OrtEnvironment could not be created")
+            return false
+        }
+        val ttsDir = resolveModelSubdir(languageTag, "tts") ?: run {
+            Log.w("OnnxInferenceManager", "loadTts: tts subdir not found for $languageTag")
+            return false
+        }
+        val fastPitchFile = resolveModelFile(ttsDir, preferred = FASTPITCH_FILE, keyword = "fastpitch") ?: run {
+            Log.w("OnnxInferenceManager", "loadTts: fastpitch model not found in $ttsDir")
+            return false
+        }
+        val hifiGanFile = resolveModelFile(ttsDir, preferred = HIFIGAN_FILE, keyword = "hifigan", exclude = fastPitchFile) ?: run {
+            Log.w("OnnxInferenceManager", "loadTts: hifigan model not found in $ttsDir")
+            return false
+        }
         return try {
             val fp = env.createSession(fastPitchFile.absolutePath, buildSessionOptions())
             val hg = env.createSession(hifiGanFile.absolutePath, buildSessionOptions())
@@ -195,25 +206,39 @@ class OnnxInferenceManager(context: Context) {
             hifiGanSession = hg
             loadedTtsTag = languageTag
             _isTtsLoaded.value = true
+            Log.i("OnnxInferenceManager", "loadTts: loaded FastPitch (${fastPitchFile.name}) + HiFi-GAN (${hifiGanFile.name}) for $languageTag")
             true
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            Log.e("OnnxInferenceManager", "loadTts: Failed to create TTS sessions for $languageTag", t)
             closeTtsLocked()
             _isTtsLoaded.value = false
             false
         }
     }
 
-    /** Preferred file, falling back to the first .onnx file in the directory. */
+    /**
+     * Preferred file, falling back to the first .onnx file in the directory.
+     * When [keyword] is set (TTS), the fallback only accepts .onnx files whose
+     * name contains it: `resolveModelSubdir` can return a flat pack root that
+     * also holds the STT model, and guessing that .onnx as a voice model would
+     * pay a multi-second session load and still fail at synthesis.
+     */
     private fun resolveModelFile(
         dir: File,
         preferred: String,
-        exclude: File? = null
+        exclude: File? = null,
+        keyword: String? = null
     ): File? {
         val preferredFile = File(dir, preferred)
         if (preferredFile.exists() && preferredFile != exclude) return preferredFile
-        return dir.listFiles()
+        val onnxFiles = dir.listFiles()
             ?.filter { it.isFile && it.extension.equals("onnx", ignoreCase = true) && it != exclude }
-            ?.firstOrNull()
+            ?: return null
+        return if (keyword != null) {
+            onnxFiles.firstOrNull { it.name.contains(keyword, ignoreCase = true) }
+        } else {
+            onnxFiles.firstOrNull()
+        }
     }
 
     /** Parses vocab from JSON (supports JSON array ["a", "b"] or JSON object mapping token->index or index->token). */

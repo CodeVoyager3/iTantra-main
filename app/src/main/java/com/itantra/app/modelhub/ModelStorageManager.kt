@@ -56,6 +56,21 @@ class ModelStorageManager(context: Context) {
     }
 
     /**
+     * Cheap synchronous on-disk check with the same semantics as [isInstalled],
+     * but independent of the async [refresh] rescan (the flow starts empty, so
+     * [isInstalled] returns false for real packs until the first scan lands).
+     * Does a single `listFiles` on the models directory — safe to call from
+     * Dispatchers.Default/IO, e.g. the mesh voice receiver deciding between
+     * ONNX TTS and system TTS for an incoming packet.
+     */
+    fun isInstalledOnDisk(languageTag: String): Boolean {
+        val children = modelsDir.listFiles() ?: return false
+        return children.any { dir ->
+            dir.isDirectory && LanguageTags.matches(dir.name, languageTag) && looksLikePack(dir)
+        }
+    }
+
+    /**
      * Deletes the extracted pack directory for [languageTag].
      *
      * @return the number of bytes freed (0 if it was not installed).
@@ -101,17 +116,16 @@ class ModelStorageManager(context: Context) {
     }
 
     /** A pack counts as installed if its manifest, stt/tts subfolders, or onnx model files exist. */
+    private fun looksLikePack(dir: File): Boolean =
+        File(dir, "manifest.json").exists() ||
+            File(dir, "stt").exists() ||
+            File(dir, "tts").exists() ||
+            (dir.listFiles()?.any { f -> f.extension.equals("onnx", ignoreCase = true) || f.isDirectory } == true)
+
     private fun scanInstalled(): Map<String, Long> {
         val children = modelsDir.listFiles() ?: return emptyMap()
         return children
-            .filter { dir ->
-                dir.isDirectory && (
-                    File(dir, "manifest.json").exists() ||
-                    File(dir, "stt").exists() ||
-                    File(dir, "tts").exists() ||
-                    (dir.listFiles()?.any { f -> f.extension.equals("onnx", ignoreCase = true) || f.isDirectory } == true)
-                )
-            }
+            .filter { it.isDirectory && looksLikePack(it) }
             .associate { it.name to dirSizeBytes(it) }
     }
 
