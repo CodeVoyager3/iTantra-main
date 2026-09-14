@@ -194,49 +194,6 @@ enum class BeaconTxPower(val advertiseConstant: Int) {
 data class AdvertiseFailure(val errorCode: Int, val message: String)
 
 /**
- * The role-defining part of a beacon: the sender plus what the beacon *means*
- * on the air (victim vs idle rescuer vs broadcast-all vs targeted rescuer vs
- * walkie presence). Volatile telemetry (coordinates, battery) is deliberately
- * excluded - these change on every GPS tick and must never force the BLE
- * advertiser to stop and restart.
- */
-data class BeaconIdentity(
-    val nodeId: Long,
-    val isDistress: Boolean,
-    val altitudeMeters: Int
-) {
-    companion object {
-        fun of(beacon: DistressBeaconPayload): BeaconIdentity =
-            BeaconIdentity(beacon.nodeId, beacon.isDistress, beacon.altitudeMeters)
-    }
-}
-
-/**
- * Pure decision: must the radio advertisement be restarted to serve [requested]?
- *
- *  - Nothing on air yet -> yes.
- *  - Role/identity changed (nodeId / distress flag / altitude sentinel) -> yes, immediately.
- *  - Same identity and identical bytes -> no.
- *  - Same identity, only volatile telemetry changed -> only once the throttle
- *    window [refreshMinIntervalMs] has elapsed since the last restart.
- *
- * Host-JVM testable (no Android imports).
- */
-internal fun shouldRestartAdvertising(
-    onAirIdentity: BeaconIdentity?,
-    onAirBytes: ByteArray?,
-    requested: DistressBeaconPayload,
-    lastRestartEpochMs: Long,
-    nowEpochMs: Long,
-    refreshMinIntervalMs: Long
-): Boolean {
-    if (onAirIdentity == null || onAirBytes == null) return true
-    if (onAirIdentity != BeaconIdentity.of(requested)) return true
-    if (onAirBytes.contentEquals(requested.toManufacturerData())) return false
-    return (nowEpochMs - lastRestartEpochMs) >= refreshMinIntervalMs
-}
-
-/**
  * BLE advertiser + scanner for the iTantra mesh.
  *
  * Both sides agree on a single 128-bit service UUID and a fixed
@@ -273,29 +230,8 @@ class BleMeshManager(context: Context) {
          */
         const val MAX_GATT_WRITE_BYTES = 512
 
-        private const val BEACON_STALE_MS = 10_000L
+        private const val BEACON_STALE_MS = 3_000L
         private const val PRUNE_PERIOD_MS = 1_000L
-
-        /**
-         * Minimum gap between two real advertisement restarts that only refresh
-         * volatile telemetry (coordinates / battery). Volatile churn must never
-         * take the beacon off the air, so restarts are throttled to this cadence.
-         */
-        private const val ADVERT_REFRESH_MIN_INTERVAL_MS = 15_000L
-
-        /** Bounded advertise-start retry schedule after a controller failure. */
-        private const val ADVERTISE_MAX_RETRIES = 5
-        private const val ADVERTISE_RETRY_DELAY_MS = 1_500L
-
-        /** How often the beacon is force re-asserted to survive a silent stop. */
-        private const val ADVERT_WATCHDOG_PERIOD_MS = 30_000L
-
-        /** Bounded scan-start retry schedule after a controller failure. */
-        private const val SCAN_MAX_RETRIES = 5
-        private const val SCAN_RETRY_DELAY_MS = 2_000L
-
-        /** How often the scan watchdog verifies scanning is still alive. */
-        private const val SCAN_WATCHDOG_PERIOD_MS = 15_000L
     }
 
     private val appContext = context.applicationContext
@@ -834,122 +770,43 @@ class BleMeshManager(context: Context) {
     // ADVERTISER — distress beacon transmission
     // =========================================================================
 
-    /** The newest beacon the app wants on the air (may differ from [onAirBeacon]). */
-    private var requestedBeacon: DistressBeaconPayload? = null
+    private var currentBeacon: DistressBeaconPayload? = null
 
-    /** TX power to use for the next real advertise (re)start. */
-    private var requestedTxPower: BeaconTxPower = BeaconTxPower.HIGH
-
-    /** True while some mode wants the beacon advertised. */
-    private var advertiseRequested = false
-
-    /** The payload currently confirmed (or optimistically) on the air. */
-    private var onAirBeacon: DistressBeaconPayload? = null
-
-    /** When the radio was last actually (re)started. */
-    private var lastAdvertiseRestartEpochMs = 0L
-
-    private var advertiseRetryJob: Job? = null
-    private var advertiseRetryAttempts = 0
-    private var advertiseWatchdogJob: Job? = null
-
-    private val advertiseCallback: AdvertiseCallback = object : AdvertiseCallback() {
+    private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             _isAdvertising.value = true
-            advertiseRetryAttempts = 0
-            onAirBeacon = requestedBeacon
             Log.i("BleMeshManager", "BLE beacon advertising started successfully")
         }
 
         override fun onStartFailure(errorCode: Int) {
-            _isAdvertising.value = false
-            onAirBeacon = null
             if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED) {
-                // A stale advertisement (old role/coordinates) is still on the
-                // air. Tear it down and retry with the payload we actually want
-                // instead of pretending success.
-                runCatching {
-                    bluetoothAdapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
-                }
-                Log.w("BleMeshManager", "BLE advertising already active - stopping stale advert and retrying")
-                scheduleAdvertiseRetry()
+                _isAdvertising.value = true
+                Log.w("BleMeshManager", "BLE beacon advertising already active")
                 return
             }
+            _isAdvertising.value = false
+            currentBeacon = null
             Log.e("BleMeshManager", "BLE beacon advertising failed, errorCode: $errorCode")
             onAdvertisingFailed?.invoke(
                 AdvertiseFailure(errorCode, "BLE advertise start failed, code $errorCode")
             )
-            scheduleAdvertiseRetry()
         }
     }
 
     /**
-     * Re-arms the advertiser after a controller failure while a beacon is still
-     * wanted. Bounded so a permanently broken controller cannot loop forever.
-     */
-    private fun scheduleAdvertiseRetry() {
-        if (!advertiseRequested) return
-        if (advertiseRetryAttempts >= ADVERTISE_MAX_RETRIES) {
-            Log.w("BleMeshManager", "BLE advertise retries exhausted; beacon stays off until the mode changes")
-            return
-        }
-        advertiseRetryJob?.cancel()
-        advertiseRetryJob = scope.launch {
-            delay(ADVERTISE_RETRY_DELAY_MS * (advertiseRetryAttempts + 1))
-            if (!advertiseRequested || _isAdvertising.value) return@launch
-            advertiseRetryAttempts++
-            Log.i("BleMeshManager", "Retrying BLE advertise start (attempt $advertiseRetryAttempts)")
-            applyAdvertising(force = true)
-        }
-    }
-
-    /**
-     * Periodically re-asserts the beacon so a controller that silently stopped
-     * advertising (no failure callback) heals itself. Bounded cadence, so this
-     * is not the per-tick churn the app used to have.
-     */
-    private fun startAdvertiseWatchdog() {
-        if (advertiseWatchdogJob?.isActive == true) return
-        advertiseWatchdogJob = scope.launch {
-            while (isActive) {
-                delay(ADVERT_WATCHDOG_PERIOD_MS)
-                if (advertiseRequested) applyAdvertising(force = true)
-            }
-        }
-    }
-
-
-    /**
-     * Requests that [beacon] be advertised.
+     * Starts advertising [beacon] as iTantra manufacturer data.
      *
-     * Coalesces volatile churn: if an advertisement with the same semantic
-     * role/identity is already on the air, only a role change or the throttled
-     * refresh window ([ADVERT_REFRESH_MIN_INTERVAL_MS]) triggers a real
-     * stop+start. Coordinates and battery change on every GPS tick and must not
-     * repeatedly take the beacon off the air - that churn is what made some
-     * devices intermittently invisible to their peers.
+     * Adheres strictly to the 31-byte legacy BLE limit:
+     *  - Primary AdvertiseData: 22-byte manufacturer payload + 2-byte ID (26 bytes total, under 31)
+     *  - ScanResponse: 128-bit Service UUID + TX Power (21 bytes total, under 31)
      *
-     * @return true when advertising was handed to the platform (or already on air).
+     * @return true when advertising was handed to the platform successfully.
      */
     fun startAdvertising(
         beacon: DistressBeaconPayload,
         txPower: BeaconTxPower = BeaconTxPower.HIGH
     ): Boolean {
-        requestedBeacon = beacon
-        requestedTxPower = txPower
-        advertiseRequested = true
-        startAdvertiseWatchdog()
-        return applyAdvertising(force = false)
-    }
-
-    /**
-     * Applies [requestedBeacon] to the radio.
-     *
-     * @param force when true the advertisement is restarted even if only
-     *   volatile telemetry changed (used after failures and by the watchdog).
-     */
-    private fun applyAdvertising(force: Boolean): Boolean {
-        val beacon = requestedBeacon ?: return false
+        if (_isAdvertising.value && currentBeacon == beacon) return true
         if (!hasBleAdvertise()) {
             onAdvertisingFailed?.invoke(
                 AdvertiseFailure(
@@ -965,22 +822,8 @@ class BleMeshManager(context: Context) {
             null
         } ?: return false
 
-        val now = System.currentTimeMillis()
-        val mustRestart = force || shouldRestartAdvertising(
-            onAirIdentity = onAirBeacon?.let { BeaconIdentity.of(it) },
-            onAirBytes = onAirBeacon?.toManufacturerData(),
-            requested = beacon,
-            lastRestartEpochMs = lastAdvertiseRestartEpochMs,
-            nowEpochMs = now,
-            refreshMinIntervalMs = ADVERT_REFRESH_MIN_INTERVAL_MS
-        )
-        if (!mustRestart) {
-            // An equivalent advertisement is already on the air; leave it alone.
-            return true
-        }
-
-        // A real (re)start: tear down whatever is on air first.
-        if (_isAdvertising.value || onAirBeacon != null) {
+        // Stop prior advertising if payload changed
+        if (_isAdvertising.value || currentBeacon != null) {
             runCatching { advertiser.stopAdvertising(advertiseCallback) }
             _isAdvertising.value = false
         }
@@ -988,7 +831,7 @@ class BleMeshManager(context: Context) {
         return try {
             val settings = AdvertiseSettings.Builder()
                 .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                .setTxPowerLevel(requestedTxPower.advertiseConstant)
+                .setTxPowerLevel(txPower.advertiseConstant)
                 .setConnectable(true)
                 .setTimeout(0)
                 .build()
@@ -1006,47 +849,32 @@ class BleMeshManager(context: Context) {
                 .build()
             startGattServer()
             advertiser.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
-            // Bookkeeping; onStartSuccess/onStartFailure reconciles this.
-            onAirBeacon = beacon
-            lastAdvertiseRestartEpochMs = now
+            currentBeacon = beacon
             _isAdvertising.value = true
             true
         } catch (t: Throwable) {
             _isAdvertising.value = false
-            onAirBeacon = null
+            currentBeacon = null
             onAdvertisingFailed?.invoke(
                 AdvertiseFailure(
                     AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR,
                     t.message ?: "startAdvertising failed"
                 )
             )
-            scheduleAdvertiseRetry()
             false
         }
     }
 
     fun stopAdvertising() {
-        advertiseRequested = false
-        advertiseRetryJob?.cancel()
-        advertiseRetryJob = null
-        advertiseRetryAttempts = 0
         runCatching { bluetoothAdapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) }
         _isAdvertising.value = false
-        onAirBeacon = null
-        requestedBeacon = null
+        currentBeacon = null
         checkStopGattServer()
     }
 
     // =========================================================================
     // SCANNER — discovers iTantra beacons and estimates distances
     // =========================================================================
-
-    /** True while some mode wants scanning active. */
-    private var scanRequested = false
-
-    private var scanRetryJob: Job? = null
-    private var scanRetryAttempts = 0
-    private var scanWatchdogJob: Job? = null
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -1060,7 +888,6 @@ class BleMeshManager(context: Context) {
         override fun onScanFailed(errorCode: Int) {
             _isScanning.value = false
             Log.e("BleMeshManager", "BLE scan failed, errorCode: $errorCode")
-            scheduleScanRetry()
         }
     }
 
@@ -1112,19 +939,12 @@ class BleMeshManager(context: Context) {
         _discoveredBeacons.value = latest.values.sortedBy { it.estimatedDistanceMeters }
     }
 
-
     /**
-     * Starts scanning for iTantra beacons (idempotent).
+     * Starts scanning for iTantra beacons.
      *
      * @return true when scanning was handed to the platform successfully.
      */
     fun startScanning(): Boolean {
-        scanRequested = true
-        startScanWatchdog()
-        return startScanningInternal()
-    }
-
-    private fun startScanningInternal(): Boolean {
         if (_isScanning.value) return true
         if (!hasBleScan()) {
             Log.w("BleMeshManager", "Cannot start scan: missing BLE scan permission")
@@ -1148,63 +968,17 @@ class BleMeshManager(context: Context) {
             startGattServer()
             scanner.startScan(listOf(anyFilter), settings, scanCallback)
             _isScanning.value = true
-            scanRetryAttempts = 0
             Log.i("BleMeshManager", "BLE scanner started")
             if (pruneJob?.isActive != true) startPruning()
             true
         } catch (t: Throwable) {
             Log.e("BleMeshManager", "startScan threw exception", t)
             _isScanning.value = false
-            scheduleScanRetry()
             false
         }
     }
 
-    /**
-     * Re-arms the scanner after a controller failure while scanning is still
-     * wanted. Bounded so a permanently broken controller cannot loop forever.
-     */
-    private fun scheduleScanRetry() {
-        if (!scanRequested) return
-        if (scanRetryAttempts >= SCAN_MAX_RETRIES) {
-            Log.w("BleMeshManager", "BLE scan retries exhausted; scanning stays off until the mode changes")
-            return
-        }
-        scanRetryJob?.cancel()
-        scanRetryJob = scope.launch {
-            delay(SCAN_RETRY_DELAY_MS * (scanRetryAttempts + 1))
-            if (!scanRequested || _isScanning.value) return@launch
-            scanRetryAttempts++
-            Log.i("BleMeshManager", "Retrying BLE scan start (attempt $scanRetryAttempts)")
-            startScanningInternal()
-        }
-    }
-
-    /**
-     * Self-heals a scan that the platform stopped silently (OEM throttling /
-     * controller reset) without ever calling back into the app.
-     */
-    private fun startScanWatchdog() {
-        if (scanWatchdogJob?.isActive == true) return
-        scanWatchdogJob = scope.launch {
-            while (isActive) {
-                delay(SCAN_WATCHDOG_PERIOD_MS)
-                if (!scanRequested) break
-                if (!_isScanning.value) {
-                    Log.w("BleMeshManager", "Scan watchdog: scanner not active, re-arming")
-                    startScanningInternal()
-                }
-            }
-        }
-    }
-
     fun stopScanning() {
-        scanRequested = false
-        scanRetryJob?.cancel()
-        scanRetryJob = null
-        scanWatchdogJob?.cancel()
-        scanWatchdogJob = null
-        scanRetryAttempts = 0
         runCatching { bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback) }
         _isScanning.value = false
         synchronized(latest) {

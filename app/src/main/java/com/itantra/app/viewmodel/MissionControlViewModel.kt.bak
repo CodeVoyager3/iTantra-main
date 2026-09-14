@@ -1292,46 +1292,16 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    /** Position (and time) last baked into the on-air beacon. */
-    private var lastBeaconedLat = Double.NaN
-    private var lastBeaconedLon = Double.NaN
-    private var lastBeaconSyncEpochMs = 0L
-
     override fun onLocationChanged(location: Location) {
         if (location.latitude != 0.0 && location.longitude != 0.0) {
             _rescuerLat.value = location.latitude
             _rescuerLon.value = location.longitude
             _hasGpsFix.value = true
             recalculateVictimDistances()
-
-            // Position is part of every beacon payload, but re-advertising on
-            // every 1 Hz GPS tick churns the BLE controller and made the device
-            // intermittently invisible to peers. Only re-assert the advert after
-            // real movement, and at most once per refresh window.
-            if (_isSosBroadcasting.value || _isRescueActive.value || _isWalkieActive.value) {
-                val now = System.currentTimeMillis()
-                val moved = distanceMetersBetween(
-                    lastBeaconedLat, lastBeaconedLon, location.latitude, location.longitude
-                )
-                if (lastBeaconedLat.isNaN() ||
-                    moved >= BEACON_POSITION_REFRESH_METERS ||
-                    now - lastBeaconSyncEpochMs >= BEACON_POSITION_REFRESH_MS
-                ) {
-                    lastBeaconedLat = location.latitude
-                    lastBeaconedLon = location.longitude
-                    lastBeaconSyncEpochMs = now
-                    syncBeaconAdvertising()
-                }
-            }
+            // Position is part of every beacon payload; keep the active mode's
+            // advert in sync so distance estimation stays valid.
+            syncBeaconAdvertising()
         }
-    }
-
-    /** Great-circle distance in meters, or Float.MAX_VALUE when a point is unknown. */
-    private fun distanceMetersBetween(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Float {
-        if (lat1.isNaN() || lon1.isNaN()) return Float.MAX_VALUE
-        val results = FloatArray(1)
-        Location.distanceBetween(lat1, lon1, lat2, lon2, results)
-        return results[0]
     }
 
     override fun onProviderEnabled(provider: String) {}
@@ -3774,11 +3744,5 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
          * level instead of a fabricated waveform.
          */
         const val SYSTEM_TTS_ACTIVE_LEVEL = 0.45f
-
-        /** Re-advertise once the device has moved at least this far (meters). */
-        const val BEACON_POSITION_REFRESH_METERS = 10f
-
-        /** ...or at least this often even when stationary (milliseconds). */
-        const val BEACON_POSITION_REFRESH_MS = 15_000L
     }
 }
