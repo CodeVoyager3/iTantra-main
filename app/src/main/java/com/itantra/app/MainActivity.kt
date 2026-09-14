@@ -91,15 +91,14 @@ class MainActivity : ComponentActivity() {
     private fun checkEmergencyIntent(intent: Intent?) {
         val isEmergency = intent?.getBooleanExtra(EXTRA_LOCKSCREEN_SOS, false) == true ||
             intent?.action == ACTION_EMERGENCY_LOCKSCREEN_SOS
+        isLockscreenSosTriggered.value = isEmergency
         if (isEmergency) {
             android.util.Log.w("MainActivity", "🚨 Emergency lockscreen SOS intent received!")
-            isLockscreenSosTriggered.value = true
-        } else {
-            isLockscreenSosTriggered.value = false
         }
     }
 
     private fun applyLockscreenVisibility() {
+        if (!isLockscreenSosTriggered.value) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -113,6 +112,19 @@ class MainActivity : ComponentActivity() {
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             keyguardManager?.requestDismissKeyguard(this, null)
+        }
+    }
+
+    private fun clearLockscreenVisibility() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.clearFlags(
+                android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
         }
     }
 
@@ -152,7 +164,11 @@ class MainActivity : ComponentActivity() {
                 } else {
                     MainAppContent(
                         viewModel = viewModel,
-                        isLockscreenSosTriggered = isLockscreenSosTriggered.value
+                        isLockscreenSosTriggered = isLockscreenSosTriggered.value,
+                        onEmergencyEnded = {
+                            isLockscreenSosTriggered.value = false
+                            clearLockscreenVisibility()
+                        }
                     )
                 }
             }
@@ -163,7 +179,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainAppContent(
     viewModel: MissionControlViewModel,
-    isLockscreenSosTriggered: Boolean = false
+    isLockscreenSosTriggered: Boolean = false,
+    onEmergencyEnded: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val colors = MinimalColorsInstance
@@ -281,6 +298,10 @@ fun MainAppContent(
             val notifManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
             notifManager?.cancel(0x505)
             (context as? android.app.Activity)?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            // One-shot: disarm so this branch can never re-fire on a surviving activity.
+            wasSosActiveByLockscreen = false
+            // Reset the activity's emergency state and lockscreen visibility before closing.
+            onEmergencyEnded()
             (context as? android.app.Activity)?.finish()
         }
     }

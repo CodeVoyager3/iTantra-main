@@ -443,11 +443,16 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     private val _isSosBroadcasting = MutableStateFlow(false)
     val isSosBroadcasting: StateFlow<Boolean> = _isSosBroadcasting.asStateFlow()
 
-    private val _wifiDirectEnabled = MutableStateFlow(false)
+    // Global radio-enable flags: both radios default ON so walkie/rescue usage
+    // works out of the box; SOS still forces both ON while broadcasting.
+    private val _wifiDirectEnabled = MutableStateFlow(true)
     val wifiDirectEnabled: StateFlow<Boolean> = _wifiDirectEnabled.asStateFlow()
 
-    private val _bluetoothEnabled = MutableStateFlow(false)
+    private val _bluetoothEnabled = MutableStateFlow(true)
     val bluetoothEnabled: StateFlow<Boolean> = _bluetoothEnabled.asStateFlow()
+
+    /** Periodic Wi-Fi Direct long-range discovery loop while any mesh mode is on. */
+    private var wifiDirectScanJob: Job? = null
 
     // Scan-driven: populated from non-distress iTantra beacons + link requests.
     private val _nearbyRescuers = MutableStateFlow<List<RescuerNode>>(emptyList())
@@ -480,10 +485,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     )
 
     fun toggleWifiDirect(enabled: Boolean) {
-        if (!_isSosBroadcasting.value) {
-            _wifiDirectEnabled.value = false
-            return
-        }
+        // Global radio toggle: valid on any page, not only while SOS is live.
         _wifiDirectEnabled.value = enabled
         val mesh = wifiDirectMeshManager
         if (enabled) {
@@ -494,19 +496,23 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             mesh?.removeGroup()
             stopMeshUdpIfIdle()
         }
+        // Re-sync the active mode: BLE alone carries everything while this is off.
+        syncWifiDirectScan()
     }
 
     fun toggleBluetooth(enabled: Boolean) {
-        if (!_isSosBroadcasting.value) {
-            _bluetoothEnabled.value = false
-            return
-        }
+        // Global radio toggle: valid on any page, not only while SOS is live.
         _bluetoothEnabled.value = enabled
         if (enabled) {
-            startBeaconAdvertising(buildDistressBeaconPayload())
+            // Re-assert whatever the active mode needs on the air.
+            syncBeaconAdvertising()
+            startBleScanIfActive()
         } else {
             stopBeaconAdvertising()
+            bleMeshManager?.stopScanning()
         }
+        // Re-sync the active mode: Wi-Fi Direct alone carries everything while this is off.
+        syncWifiDirectScan()
     }
 
     private fun currentBeaconTxPower(): BeaconTxPower {
@@ -558,6 +564,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
      */
     private fun syncBeaconAdvertising() {
         when {
+            // Global Bluetooth off: Wi-Fi Direct carries everything, so nothing
+            // may be beaconed or scanned over BLE.
+            !_bluetoothEnabled.value -> stopBeaconAdvertising()
             _isSosBroadcasting.value -> startBeaconAdvertising(buildDistressBeaconPayload())
             _isRescueActive.value -> startRescuerBeaconAdvertising()
             _isWalkieActive.value -> bleMeshManager?.startAdvertising(
@@ -567,6 +576,42 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             else -> stopBeaconAdvertising()
         }
         syncProfileBroadcast()
+        // Central on/off re-sync: the long-range scan follows the same lifecycle.
+        syncWifiDirectScan()
+    }
+
+    /**
+     * Battery-friendly periodic Wi-Fi Direct long-range discovery. While any
+     * mesh mode is active and Wi-Fi Direct is enabled, discovery re-runs on a
+     * slow [WIFI_DIRECT_SCAN_INTERVAL_MS] loop and the refreshed peer list is
+     * folded into the walkie device list. Idempotent: re-sync calls while the
+     * job is already in the desired state are no-ops, so 1 Hz GPS ticks that
+     * re-trigger [syncBeaconAdvertising] never reset the scan cadence.
+     * BLE remains the always-on near-field scan and is not affected here.
+     */
+    private fun syncWifiDirectScan() {
+        val shouldScan = (_isSosBroadcasting.value || _isRescueActive.value || _isWalkieActive.value) &&
+            _wifiDirectEnabled.value
+        if (wifiDirectScanJob?.isActive == true) {
+            if (!shouldScan) {
+                wifiDirectScanJob?.cancel()
+                wifiDirectScanJob = null
+                wifiDirectMeshManager?.stopDiscovery()
+            }
+            return
+        }
+        if (!shouldScan) {
+            wifiDirectMeshManager?.stopDiscovery()
+            return
+        }
+        wifiDirectScanJob = viewModelScope.launch {
+            while (isActive) {
+                wifiDirectMeshManager?.startDiscovery()
+                delay(WIFI_DIRECT_SCAN_INTERVAL_MS)
+                wifiDirectMeshManager?.requestPeers()
+                refreshWalkieDevicesList()
+            }
+        }
     }
 
     /**
@@ -593,6 +638,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         // Wi-Fi Direct group + UDP mesh so rescuers can send voice-link packets.
         wifiDirectMeshManager?.createGroup()
         wifiDirectMeshManager?.startUdpBroadcast()
+        syncWifiDirectScan()
 
         // Listen for rescuer nodes advertising on the mesh while in distress.
         bleMeshManager?.startScanning()
@@ -620,6 +666,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         stopMeshUdpIfIdle()
         syncVoiceCaptureState()
         syncBeaconAdvertising()
+        syncWifiDirectScan()
     }
 
     /**
@@ -651,6 +698,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     fun isLocationEnabled(): Boolean = bleMeshManager?.isLocationEnabled() ?: false
 
     fun onBluetoothStateRestored() {
+        // A globally disabled Bluetooth radio stays off even after the adapter
+        // comes back — Wi-Fi Direct carries everything until the user re-enables it.
+        if (!_bluetoothEnabled.value) return
         if (_isSosBroadcasting.value) {
             startBeaconAdvertising(buildDistressBeaconPayload())
             bleMeshManager?.startScanning()
@@ -737,12 +787,17 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         if (active) {
             startMeshVoiceCapture()
             syncBeaconAdvertising()
-            wifiDirectMeshManager?.startDiscovery()
-            wifiDirectMeshManager?.startUdpBroadcast()
-            bleMeshManager?.startScanning() // BLE peers also appear as walkie nodes
+            if (_wifiDirectEnabled.value) {
+                wifiDirectMeshManager?.startDiscovery()
+                wifiDirectMeshManager?.startUdpBroadcast()
+            }
+            if (_bluetoothEnabled.value) {
+                bleMeshManager?.startScanning() // BLE peers also appear as walkie nodes
+            }
             // Walkie has to ADVERTISE as well: discovery alone never forms a
             // GATT link, because peers can only be found by their advert.
             syncBeaconAdvertising()
+            syncWifiDirectScan()
             updateWalkieLinkState()
             logVoice(
                 "walkie",
@@ -754,6 +809,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             stopMeshUdpIfIdle()
             stopBleScanIfIdle()
             syncBeaconAdvertising()
+            syncWifiDirectScan()
             _discoveredWalkieDevices.value = emptyList()
             _isTransmitting.value = false
             _isVadSpeaking.value = false
@@ -836,7 +892,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         if (_isRefreshingNodes.value) return
         _isRefreshingNodes.value = true
         wifiDirectMeshManager?.requestPeers()
-        bleMeshManager?.startScanning()
+        if (_bluetoothEnabled.value) {
+            bleMeshManager?.startScanning()
+        }
         viewModelScope.launch {
             delay(1500)
             refreshWalkieDevicesList()
@@ -870,20 +928,25 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         _pairedWalkieDevices.value = pairedList
 
         // 2. Rebuild Discovered Devices (beacons heard that are not paired and not self)
-        val discoveredList = latestWalkiePresenceBeacons.values
-            .filter { it.nodeId != _nodeId.value && !pairedNodeIds.contains(it.nodeId) }
-            .map { beacon ->
-                PeerDevice(
-                    id = "node-${beacon.nodeId}",
-                    name = nodeCallsign(beacon.nodeId),
-                    address = nodeCallsign(beacon.nodeId),
-                    protocol = TransportProtocol.BLE,
-                    signalStrengthDbm = beacon.rssi,
-                    isConnected = false,
-                    batteryPercent = beacon.batteryPercent
-                ).withPeerProfile()
-            }
-            .distinctBy { it.id }
+        val discoveredList = (
+            latestWalkiePresenceBeacons.values
+                .filter { it.nodeId != _nodeId.value && !pairedNodeIds.contains(it.nodeId) }
+                .map { beacon ->
+                    PeerDevice(
+                        id = "node-${beacon.nodeId}",
+                        name = nodeCallsign(beacon.nodeId),
+                        address = nodeCallsign(beacon.nodeId),
+                        protocol = TransportProtocol.BLE,
+                        signalStrengthDbm = beacon.rssi,
+                        isConnected = false,
+                        batteryPercent = beacon.batteryPercent
+                    ).withPeerProfile()
+                } +
+                // Long-range Wi-Fi Direct peers appended alongside the
+                // BLE-discovered nodes. Their ids are P2P MAC addresses, which
+                // never collide with the "node-NNNN" ids above.
+                wifiDirectMeshManager?.peers?.value.orEmpty()
+            ).distinctBy { it.id }
 
         _discoveredWalkieDevices.value = discoveredList
         updateWalkieLinkState()
@@ -1038,9 +1101,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         clearSessionTranscripts()
         _isRescueActive.value = active
         if (active) {
-            bleMeshManager?.startScanning()
+            if (_bluetoothEnabled.value) {
+                bleMeshManager?.startScanning()
+            }
             syncBeaconAdvertising()
-            wifiDirectMeshManager?.startUdpBroadcast()
+            if (_wifiDirectEnabled.value) {
+                wifiDirectMeshManager?.startUdpBroadcast()
+            }
+            syncWifiDirectScan()
             syncVoiceCaptureState() // Radar scanning: mic stays OFF until call or broadcast is initiated
         } else {
             // Leaving rescue mode: broadcast a close (empty payload = everyone)
@@ -1070,6 +1138,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             _modelWarningMessage.value = null
             stopBleScanIfIdle()
             syncBeaconAdvertising()
+            syncWifiDirectScan()
         }
     }
 
@@ -1086,7 +1155,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             }
             _connectedVictimIntercom.value = null
             _rescueConnectionMode.value = RescueConnectionMode.BROADCAST_ALL
-            wifiDirectMeshManager?.startUdpBroadcast()
+            if (_wifiDirectEnabled.value) {
+                wifiDirectMeshManager?.startUdpBroadcast()
+            }
             syncBeaconAdvertising()
             syncVoiceCaptureState()
             // 1-way megaphone: a fresh frame sequence for this announcement.
@@ -1118,6 +1189,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     fun connectVictimIntercom(victim: DistressVictim) {
         clearSessionTranscripts()
         // Zero-friction instant 1-to-1 connect.
+        lastExplicitDisconnectEpochMs = 0L
         _isBroadcastingToAll.value = false
         _selectedVictim.value = victim
         _connectedVictimIntercom.value = victim.copy(isIntercomConnected = true)
@@ -1145,7 +1217,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 .put(if (translationEngine.isInstalled()) 1.toByte() else 0.toByte())
                 .array()
         )
-        wifiDirectMeshManager?.startUdpBroadcast()
+        if (_wifiDirectEnabled.value) {
+            wifiDirectMeshManager?.startUdpBroadcast()
+        }
         logVoice("send", "voice-link request -> ${nodeCallsign(victim.nodeId)} (nodeId=${victim.nodeId})")
         broadcastMeshPacket(PacketFraming.encode(linkRequest), victim.nodeId)
         broadcastTranslationCapability()
@@ -1154,6 +1228,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
     fun disconnectVictimIntercom() {
         clearSessionTranscripts()
+        lastExplicitDisconnectEpochMs = System.currentTimeMillis()
         val target = _connectedVictimIntercom.value
         if (target != null) {
             val close = ItantraPacket(
@@ -1225,7 +1300,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     private fun startBleScanIfActive() {
-        if (_isRescueActive.value || _isSosBroadcasting.value || _isWalkieActive.value) {
+        if (_bluetoothEnabled.value && (_isRescueActive.value || _isSosBroadcasting.value || _isWalkieActive.value)) {
             bleMeshManager?.startScanning()
         }
     }
@@ -1771,20 +1846,48 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 callingBeacons.firstOrNull()
             }
             if (callingRescuer != null) {
-                val node = callingRescuer.toRescuerNode().copy(isConnected = true)
-                _connectedRescuer.value = node
-                _isReceivingOneWayBroadcast.value =
-                    callingRescuer.altitudeMeters == DistressBeaconPayload.ALTITUDE_RESCUER_BROADCAST_ALL
-                lastRescuerContactEpochMs = System.currentTimeMillis()
-                syncVoiceCaptureState()
+                // After an explicit disconnect a late "calling" advert can
+                // still be in flight: within the grace window an existing
+                // connection keeps refreshing, but a dropped one must not be
+                // silently re-established from beacon data alone.
+                val withinDisconnectGrace =
+                    System.currentTimeMillis() - lastExplicitDisconnectEpochMs <= EXPLICIT_DISCONNECT_GRACE_MS
+                if (_connectedRescuer.value != null || !withinDisconnectGrace) {
+                    val node = callingRescuer.toRescuerNode().copy(isConnected = true)
+                    _connectedRescuer.value = node
+                    _isReceivingOneWayBroadcast.value =
+                        callingRescuer.altitudeMeters == DistressBeaconPayload.ALTITUDE_RESCUER_BROADCAST_ALL
+                    lastRescuerContactEpochMs = System.currentTimeMillis()
+                    syncVoiceCaptureState()
+                } else {
+                    logVoice(
+                        "sos",
+                        "beacon reconnect suppressed: within ${EXPLICIT_DISCONNECT_GRACE_MS}ms of explicit disconnect (resc-${callingRescuer.nodeId})"
+                    )
+                }
             } else if (_connectedRescuer.value != null) {
-                // If rescuer beacon is seen but explicitly targeting ANOTHER specific victim, drop link
+                // The connected rescuer's beacon calls us only with -1
+                // (broadcast-all) or our own target mask. Anything else —
+                // idle (0) or another victim's mask — means "no longer
+                // calling us" and must drop fast, but only once the last
+                // contact is slightly stale so a fresh link never races a
+                // stale idle advert from before the rescuer's new "calling"
+                // advert propagated. A beacon that disappears entirely keeps
+                // the original 25s timeout.
                 val connectedRescuerBeacon = rescuerBeacons.firstOrNull { "resc-${it.nodeId}" == connectedRescuerId }
                 val isExplicitlyNotCallingUs = connectedRescuerBeacon != null &&
-                    connectedRescuerBeacon.altitudeMeters > 0 &&
+                    connectedRescuerBeacon.altitudeMeters != DistressBeaconPayload.ALTITUDE_RESCUER_BROADCAST_ALL &&
                     connectedRescuerBeacon.altitudeMeters != myTargetMask
+                val contactStaleMs = System.currentTimeMillis() - lastRescuerContactEpochMs
+                val fastDrop = isExplicitlyNotCallingUs && contactStaleMs > 2_000L
 
-                if (isExplicitlyNotCallingUs || System.currentTimeMillis() - lastRescuerContactEpochMs > 25_000L) {
+                if (fastDrop || contactStaleMs > 25_000L) {
+                    if (fastDrop) {
+                        logVoice(
+                            "sos",
+                            "connected rescuer $connectedRescuerId beacon no longer calling us - fast disconnect (${contactStaleMs}ms stale)"
+                        )
+                    }
                     _connectedRescuer.value = null
                     _isReceivingOneWayBroadcast.value = false
                     syncVoiceCaptureState()
@@ -2051,24 +2154,42 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 if (textToSpeak.isNotBlank()) {
                     // If in SOS mode and not currently connected, auto-lock onto this rescuer
                     if (_isSosBroadcasting.value && _connectedRescuer.value == null) {
-                        lastRescuerContactEpochMs = System.currentTimeMillis()
-                        val rescuerId = "resc-${packet.nodeId}"
-                        val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
-                        _connectedRescuer.value = existing?.copy(isConnected = true)
-                            ?: rescuerNodeFor(packet.nodeId, "iTantra Rescuer")
-                        syncVoiceCaptureState()
-                        checkCrossLingualStatus()
-                    }
-                    // If in Rescue mode and not currently connected, auto-lock onto this distress victim
-                    if (_isRescueActive.value && _connectedVictimIntercom.value == null) {
-                        val victim = _activeDistressVictims.value.firstOrNull { it.nodeId == packet.nodeId }
-                        if (victim != null) {
-                            _connectedVictimIntercom.value = victim.copy(isIntercomConnected = true)
-                            _rescueConnectionMode.value = RescueConnectionMode.ONE_TO_ONE
-                            lastVictimContactEpochMs = System.currentTimeMillis()
-                            startRescuerBeaconAdvertising()
+                        if (System.currentTimeMillis() - lastExplicitDisconnectEpochMs <= EXPLICIT_DISCONNECT_GRACE_MS) {
+                            logVoice(
+                                "sos",
+                                "auto-lock suppressed: within ${EXPLICIT_DISCONNECT_GRACE_MS}ms of explicit disconnect (text from ${nodeCallsign(packet.nodeId)})"
+                            )
+                        } else {
+                            lastRescuerContactEpochMs = System.currentTimeMillis()
+                            val rescuerId = "resc-${packet.nodeId}"
+                            val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
+                            _connectedRescuer.value = existing?.copy(isConnected = true)
+                                ?: rescuerNodeFor(packet.nodeId, "iTantra Rescuer")
                             syncVoiceCaptureState()
                             checkCrossLingualStatus()
+                        }
+                    }
+                    // If in Rescue mode and not currently connected, auto-lock onto this distress victim.
+                    // Never while doing a 1-way broadcast-all (a megaphone
+                    // announcement must not be hijacked into a 1-to-1 link),
+                    // and never within the grace window after an explicit
+                    // disconnect.
+                    if (_isRescueActive.value && _connectedVictimIntercom.value == null && !_isBroadcastingToAll.value) {
+                        val victim = _activeDistressVictims.value.firstOrNull { it.nodeId == packet.nodeId }
+                        if (victim != null) {
+                            if (System.currentTimeMillis() - lastExplicitDisconnectEpochMs <= EXPLICIT_DISCONNECT_GRACE_MS) {
+                                logVoice(
+                                    "rescue",
+                                    "auto-lock suppressed: within ${EXPLICIT_DISCONNECT_GRACE_MS}ms of explicit disconnect (text from victim ${nodeCallsign(packet.nodeId)})"
+                                )
+                            } else {
+                                _connectedVictimIntercom.value = victim.copy(isIntercomConnected = true)
+                                _rescueConnectionMode.value = RescueConnectionMode.ONE_TO_ONE
+                                lastVictimContactEpochMs = System.currentTimeMillis()
+                                startRescuerBeaconAdvertising()
+                                syncVoiceCaptureState()
+                                checkCrossLingualStatus()
+                            }
                         }
                     }
 
@@ -2130,6 +2251,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                     refreshRescuerContact(packet.nodeId)
                     val rescuerId = "resc-${packet.nodeId}"
                     val existing = _nearbyRescuers.value.firstOrNull { it.id == rescuerId }
+                    // Explicit reconnect request from a rescuer: clear any
+                    // disconnect grace so the link can re-establish cleanly.
+                    lastExplicitDisconnectEpochMs = 0L
                     _connectedRescuer.value = existing?.copy(isConnected = true)
                         ?: rescuerNodeFor(packet.nodeId, "iTantra Rescuer")
                     lastRescuerContactEpochMs = System.currentTimeMillis()
@@ -2188,6 +2312,10 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
                 if (isBroadcastClose || (senderIsConnected && closeTargetsUs)) {
                     _connectedRescuer.value = null
                     _isReceivingOneWayBroadcast.value = false
+                    // Told to drop the link: start the grace window so a late
+                    // "calling" beacon or the rescuer's next text cannot
+                    // silently re-establish what was just closed.
+                    lastExplicitDisconnectEpochMs = System.currentTimeMillis()
                     syncVoiceCaptureState()
                 }
                 if (_connectedVictimIntercom.value?.nodeId == packet.nodeId) {
@@ -2957,10 +3085,14 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     private fun stopMeshUdpIfIdle() {
-        val needed = _isWalkieActive.value ||
-            _isBroadcastingToAll.value ||
-            _connectedVictimIntercom.value != null ||
-            (_isSosBroadcasting.value && _wifiDirectEnabled.value)
+        // The global Wi-Fi Direct flag gates the whole UDP mesh: with the
+        // radio off, nothing may keep the socket alive.
+        val needed = _wifiDirectEnabled.value && (
+            _isWalkieActive.value ||
+                _isBroadcastingToAll.value ||
+                _connectedVictimIntercom.value != null ||
+                _isSosBroadcasting.value
+            )
         if (!needed) {
             wifiDirectMeshManager?.stopUdp()
         }
@@ -3060,6 +3192,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         } catch (_: Exception) {}
         audioBeaconJob?.cancel()
         remoteAudioDecayJob?.cancel()
+        wifiDirectScanJob?.cancel()
         voiceFrameChannel.close()
         audioCaptureEngine?.stop()
         audioPlaybackEngine?.stop()
@@ -3644,45 +3777,67 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     }
 
     /**
-     * Broadcasts an encoded Itantra mesh packet across BOTH transports:
-     * 1. BLE GATT (guaranteed direct peer-to-peer off-grid link)
-     * 2. UDP broadcast bursts + a direct unicast to every peer whose IP we
-     *    learned from inbound traffic, so delivery does not depend on both
-     *    phones sharing one broadcast domain.
+     * Broadcasts an encoded Itantra mesh packet with range-aware transport
+     * selection instead of firing every radio unconditionally:
+     *
+     * - Bluetooth off  -> skip BLE GATT entirely (Wi-Fi Direct only).
+     * - Wi-Fi Direct off -> skip UDP entirely (BLE only).
+     * - Both on, targeted: BLE-linked target -> BLE GATT only (nearby);
+     *   otherwise UDP broadcast + unicast to that node's known IP (far).
+     * - Both on, broadcast to all: BLE GATT + UDP broadcast, with per-peer
+     *   UDP unicast only to peers without a live GATT link (they already got
+     *   the packet over GATT).
      */
     fun broadcastMeshPacket(packetBytes: ByteArray, targetNodeId: Long? = null) {
+        val useBle = _bluetoothEnabled.value
+        val useUdp = _wifiDirectEnabled.value
         logVoice(
             "send",
             "mesh packet ${packetBytes.size}B target=${targetNodeId?.let { nodeCallsign(it) } ?: "all"} " +
-                "knownPeerIps=${peerAddressBook.knownPeers().size}"
+                "radios=ble:$useBle/udp:$useUdp knownPeerIps=${peerAddressBook.knownPeers().size}"
         )
         viewModelScope.launch(Dispatchers.IO) {
-            // 1. Off-grid BLE direct transmission
-            val bleTargets = runCatching {
-                bleMeshManager?.broadcastPacket(packetBytes, targetNodeId) ?: 0
-            }.getOrDefault(0)
+            val linked = bleMeshManager?.connectedNodeIds?.value.orEmpty()
+            val targetIsBleLinked = targetNodeId != null && targetNodeId in linked
 
-            // 2. Unicast to peers with a known direct IP (reaches across subnets
-            //    where UDP broadcast is dropped).
-            var udpUnicast = 0
-            val knownPeers = peerAddressBook.knownPeers()
-            for ((peerNodeId, host) in knownPeers) {
-                if (peerNodeId == _nodeId.value) continue
-                if (targetNodeId != null && peerNodeId != targetNodeId) continue
-                if (wifiDirectMeshManager?.sendDatagram(packetBytes, host, WifiDirectMeshManager.UDP_PORT) == true) {
-                    udpUnicast++
-                }
+            // 1. Off-grid BLE direct transmission: skipped when Bluetooth is
+            //    off, or when both radios are on and the target is a far node
+            //    that must be reached over UDP instead.
+            var bleTargets = 0
+            val sendBle = useBle && (targetNodeId == null || !useUdp || targetIsBleLinked)
+            if (sendBle) {
+                bleTargets = runCatching {
+                    bleMeshManager?.broadcastPacket(packetBytes, targetNodeId) ?: 0
+                }.getOrDefault(0)
             }
 
-            // 3. High-speed UDP transmission (repeated bursts for packet-loss mitigation)
+            // 2. UDP unicast to peers with a known direct IP (reaches across
+            //    subnets where UDP broadcast is dropped). When broadcasting to
+            //    all, BLE-linked peers are skipped — they already received the
+            //    packet over GATT.
+            var udpUnicast = 0
             var udpBroadcast = false
-            repeat(3) {
-                if (wifiDirectMeshManager?.broadcastDatagram(packetBytes) == true) udpBroadcast = true
-                delay(30)
+            val sendUdp = useUdp && (targetNodeId == null || !useBle || !targetIsBleLinked)
+            if (sendUdp) {
+                for ((peerNodeId, host) in peerAddressBook.knownPeers()) {
+                    if (peerNodeId == _nodeId.value) continue
+                    if (targetNodeId != null && peerNodeId != targetNodeId) continue
+                    if (targetNodeId == null && peerNodeId in linked) continue
+                    if (wifiDirectMeshManager?.sendDatagram(packetBytes, host, WifiDirectMeshManager.UDP_PORT) == true) {
+                        udpUnicast++
+                    }
+                }
+
+                // 3. High-speed UDP transmission (repeated bursts for packet-loss mitigation)
+                repeat(3) {
+                    if (wifiDirectMeshManager?.broadcastDatagram(packetBytes) == true) udpBroadcast = true
+                    delay(30)
+                }
             }
             logVoice(
                 "ble",
-                "mesh packet -> gattTargets=$bleTargets | [udp] broadcast=$udpBroadcast unicastPeers=$udpUnicast"
+                "mesh packet -> gattTargets=$bleTargets | [udp] broadcast=$udpBroadcast unicastPeers=$udpUnicast " +
+                    "(ble=$useBle udp=$useUdp targetBleLinked=$targetIsBleLinked)"
             )
         }
     }
@@ -3752,6 +3907,13 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         /** How often the walkie link indicator is re-evaluated while active. */
         const val LINK_LIVENESS_TICK_MS = 2_000L
 
+        /**
+         * Wi-Fi Direct long-range discovery cadence while any mesh mode is
+         * active: long enough to be battery-friendly, short enough that a
+         * peer list refresh lands well within a user's patience window.
+         */
+        const val WIFI_DIRECT_SCAN_INTERVAL_MS = 20_000L
+
         /** Received audio level is held this long after the last voice frame. */
         const val REMOTE_AUDIO_HOLD_MS = 400L
 
@@ -3780,5 +3942,12 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
         /** ...or at least this often even when stationary (milliseconds). */
         const val BEACON_POSITION_REFRESH_MS = 15_000L
+
+        /**
+         * After an explicit disconnect, both sides suppress auto-lock (from
+         * inbound text or a late "calling" beacon advert) for this long so a
+         * deliberately broken intercom link cannot silently re-establish.
+         */
+        const val EXPLICIT_DISCONNECT_GRACE_MS = 15_000L
     }
 }

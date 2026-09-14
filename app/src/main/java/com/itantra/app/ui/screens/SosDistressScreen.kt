@@ -1720,8 +1720,7 @@ fun SosDistressScreen(
 
                     Switch(
                         checked = wifiDirectEnabled,
-                        onCheckedChange = { if (isSosBroadcasting) viewModel.toggleWifiDirect(it) },
-                        enabled = isSosBroadcasting,
+                        onCheckedChange = { viewModel.toggleWifiDirect(it) },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
                             checkedTrackColor = AccentBlue,
@@ -1794,8 +1793,7 @@ fun SosDistressScreen(
 
                     Switch(
                         checked = bluetoothEnabled,
-                        onCheckedChange = { if (isSosBroadcasting) viewModel.toggleBluetooth(it) },
-                        enabled = isSosBroadcasting,
+                        onCheckedChange = { viewModel.toggleBluetooth(it) },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
                             checkedTrackColor = AccentBlue,
