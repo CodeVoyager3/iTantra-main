@@ -94,8 +94,6 @@ class MainActivity : ComponentActivity() {
         if (isEmergency) {
             android.util.Log.w("MainActivity", "🚨 Emergency lockscreen SOS intent received!")
             isLockscreenSosTriggered.value = true
-        } else {
-            isLockscreenSosTriggered.value = false
         }
     }
 
@@ -281,7 +279,7 @@ fun MainAppContent(
             val notifManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
             notifManager?.cancel(0x505)
             (context as? android.app.Activity)?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            (context as? android.app.Activity)?.finish()
+            (context as? android.app.Activity)?.finishAndRemoveTask()
         }
     }
 
